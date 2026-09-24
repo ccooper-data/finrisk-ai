@@ -28,9 +28,11 @@ def quarter_inventory(cache_dir:Path,config:CohortBuildConfig)->pd.DataFrame:
                      "sha256":file_sha256(p) if p.exists() and p.stat().st_size>0 else None})
     return pd.DataFrame(rows)
 
-def write_run_evidence(out_dir,config,cohort,events,cache_dir):
+def write_run_evidence(out_dir,config,cohort,events,cache_dir,diagnostics=None):
     out_dir.mkdir(parents=True,exist_ok=True)
     qinv=quarter_inventory(cache_dir,config);qinv.to_csv(out_dir/"quarter_inventory.csv",index=False)
+    if diagnostics is not None:
+        pd.DataFrame(diagnostics).to_csv(out_dir/"quarter_funnel.csv",index=False)
     cohort.to_parquet(out_dir/"sec_labeled_cohort.parquet",index=False)
     events.to_parquet(out_dir/"distress_events.parquet",index=False)
     manifest={"artifact_version":1,"created_utc":datetime.now(timezone.utc).isoformat(),"status":"complete",
@@ -42,8 +44,9 @@ def write_run_evidence(out_dir,config,cohort,events,cache_dir):
 def execute_real_sec_build(user_agent:str,cache_dir:Path,out_dir:Path,config:CohortBuildConfig|None=None)->dict:
     config=config or CohortBuildConfig();out_dir.mkdir(parents=True,exist_ok=True)
     try:
-        cohort,events=build_labeled_sec_cohort(config,user_agent,cache_dir)
-        return write_run_evidence(out_dir,config,cohort,events,cache_dir)
+        diagnostics=[]
+        cohort,events=build_labeled_sec_cohort(config,user_agent,cache_dir,diagnostics=diagnostics)
+        return write_run_evidence(out_dir,config,cohort,events,cache_dir,diagnostics=diagnostics)
     except Exception as exc:
         failure={"artifact_version":1,"created_utc":datetime.now(timezone.utc).isoformat(),"status":"failed",
                  "config":asdict(config),"error_type":type(exc).__name__,"error":str(exc),"sources":source_manifest(cache_dir)}
