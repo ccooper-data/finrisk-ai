@@ -1,0 +1,18 @@
+import pandas as pd
+from finrisk.cohort_builder import CohortBuildConfig, quarters
+from finrisk.labels import label_forward_distress
+from finrisk.periods import select_period_correct_facts
+
+def test_quarter_plan():
+    assert [q.slug for q in quarters(CohortBuildConfig(start_year=2026,end_year=2026,end_quarter=2))]==["2026q1","2026q2"]
+
+def test_forward_label_is_strictly_future():
+    obs=pd.DataFrame({"cik":["1","1"],"filed":["2025-01-01","2025-12-31"]})
+    ev=pd.DataFrame({"cik":["1"],"event_date":["2025-06-01"],"event_type":["sec_8k_item_1_03"]})
+    out=label_forward_distress(obs,ev)
+    assert out["distress_12m"].tolist()==[1,0]
+
+def test_period_semantics_exclude_ytd_10q():
+    f=pd.DataFrame({"adsh":["a","a"],"feature":["revenue","revenue"],"tag":["Revenues","Revenues"],"ddate":pd.to_datetime(["2025-06-30","2025-06-30"]),"period":pd.to_datetime(["2025-06-30","2025-06-30"]),"qtrs":[1,2],"form":["10-Q","10-Q"]})
+    out=select_period_correct_facts(f)
+    assert out["qtrs"].tolist()==[1]
