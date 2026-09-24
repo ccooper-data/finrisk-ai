@@ -1,0 +1,52 @@
+name: Build real SEC cohort
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Smoke validates one year; full builds the historical cohort"
+        required: true
+        default: "smoke"
+        type: choice
+        options: [smoke, full]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Require SEC identity
+        shell: bash
+        run: |
+          test -n "$SEC_USER_AGENT" || { echo "Repository secret SEC_USER_AGENT is required"; exit 1; }
+          [[ "$SEC_USER_AGENT" == *"@"* ]] || { echo "SEC_USER_AGENT must contain a contact email"; exit 1; }
+      - name: Install
+        run: pip install -e ".[dev,ml]"
+      - name: Unit tests
+        run: pytest -q
+      - name: Restore SEC cache
+        uses: actions/cache@v4
+        with:
+          path: data/cache/sec
+          key: sec-source-cache-${{ runner.os }}-v1
+      - name: Build smoke cohort
+        if: ${{ inputs.mode == 'smoke' }}
+        run: finrisk build-sec-cohort --start-year 2025 --end-year 2025 --end-quarter 4 --out-dir artifacts/sec-cohort-smoke
+      - name: Build full historical cohort
+        if: ${{ inputs.mode == 'full' }}
+        run: finrisk build-sec-cohort --start-year 2009 --end-year 2026 --end-quarter 2 --out-dir artifacts/sec-cohort-full
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: finrisk-sec-cohort-${{ inputs.mode }}-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
