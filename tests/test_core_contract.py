@@ -33,3 +33,14 @@ def test_discrete_quarter_is_preferred_over_ytd_when_both_exist():
     f=pd.DataFrame({"adsh":["q2","q2"],"cik":[1,1],"form":["10-Q","10-Q"],"period":pd.to_datetime(["2025-06-30","2025-06-30"]),"filed":pd.to_datetime(["2025-08-01","2025-08-01"]),"feature":["revenue","revenue"],"tag":["Revenues","Revenues"],"ddate":pd.to_datetime(["2025-06-30","2025-06-30"]),"qtrs":[1,2],"value":[110.0,200.0]})
     wide=build_period_matrix(f)
     assert wide.loc[0,"revenue"]==110.0
+
+
+def test_sec_integer_dates_parse_as_calendar_dates():
+    from finrisk.dataset import eligible_submissions
+    sub=pd.DataFrame({
+        "adsh":["a"],"cik":[1],"form":["10-Q"],
+        "filed":[20250214],"period":[20241231],
+    })
+    out=eligible_submissions(sub)
+    assert out.loc[0,"filed"]==pd.Timestamp("2025-02-14")
+    assert out.loc[0,"period"]==pd.Timestamp("2024-12-31")

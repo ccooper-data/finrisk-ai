@@ -39,7 +39,7 @@ def canonical_numeric_facts(num: pd.DataFrame, submissions: pd.DataFrame) -> pd.
     if "coreg" in facts.columns:
         facts = facts[facts["coreg"].isna() | facts["coreg"].eq("")]
     facts["feature"] = facts["tag"].map(TAG_MAP)
-    facts["ddate"] = pd.to_datetime(facts["ddate"].astype(str), errors="coerce")
+    facts["ddate"] = pd.to_datetime(facts["ddate"].astype("string"), format="%Y%m%d", errors="coerce")
     meta_cols = [c for c in SUB_COLUMNS if c in submissions.columns]
     return facts.merge(submissions[meta_cols], on="adsh", how="inner", validate="many_to_one")
 
