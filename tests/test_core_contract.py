@@ -44,3 +44,15 @@ def test_sec_integer_dates_parse_as_calendar_dates():
     out=eligible_submissions(sub)
     assert out.loc[0,"filed"]==pd.Timestamp("2025-02-14")
     assert out.loc[0,"period"]==pd.Timestamp("2024-12-31")
+
+
+def test_eligible_submissions_parses_integer_sec_dates():
+    from finrisk.dataset import eligible_submissions
+    raw=pd.DataFrame({
+        "adsh":["x"],"cik":[1234],"form":["10-Q"],
+        "filed":[20250214],"period":[20241231]
+    })
+    out=eligible_submissions(raw)
+    assert len(out)==1
+    assert out.loc[0,"filed"]==pd.Timestamp("2025-02-14")
+    assert out.loc[0,"period"]==pd.Timestamp("2024-12-31")
