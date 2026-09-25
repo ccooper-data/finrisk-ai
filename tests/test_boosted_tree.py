@@ -5,8 +5,9 @@ from finrisk.modeling.boosted_tree import train_boosted_tree
 def test_boosted_tree_preserves_temporal_populations():
     rng=np.random.default_rng(42)
     dates=pd.date_range("2018-01-01","2024-12-31",periods=500)
-    f=pd.DataFrame({"filed":dates,"distress_12m":([0]*480+[1]*20)})
-    labels=f["distress_12m"].to_numpy(copy=True)\n    rng.shuffle(labels)\n    f["distress_12m"]=labels
+    labels=np.array([0]*480+[1]*20,dtype=int)
+    rng.shuffle(labels)
+    f=pd.DataFrame({"filed":dates,"distress_12m":labels})
     for name in ["current_ratio","liabilities_to_assets","roa","roe"]:
         f[name]=rng.normal(size=len(f))
     _,_,metrics,config=train_boosted_tree(f)
