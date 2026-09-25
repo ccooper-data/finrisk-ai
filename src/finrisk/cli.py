@@ -54,3 +54,14 @@ def train_baseline(
     from finrisk.modeling.baseline import run_baseline
     evidence=run_baseline(cohort,out_dir)
     typer.echo(json.dumps(evidence,indent=2))
+
+
+@app.command("train-boosted-tree")
+def train_boosted_tree_command(
+    cohort: Path = typer.Option(..., exists=True, help="Frozen source-hashed SEC cohort Parquet."),
+    out_dir: Path = typer.Option(Path("artifacts/modeling/boosted-tree")),
+):
+    """Train the nonlinear tree benchmark on the frozen temporal population."""
+    from finrisk.modeling.boosted_tree import run_boosted_tree
+    evidence=run_boosted_tree(cohort,out_dir)
+    typer.echo(json.dumps(evidence,indent=2))
