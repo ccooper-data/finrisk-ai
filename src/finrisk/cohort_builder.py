@@ -63,7 +63,7 @@ def build_sec_fundamentals(config,user_agent,cache_dir,diagnostics=None):
         eligible=eligible_submissions(raw_sub)
         sub=eligible[eligible["form"].isin(config.forms)].copy()
         if sub.empty:
-            diagnostics.append({"quarter":quarter.slug,"raw_submissions":len(raw_sub),"eligible_submissions":len(eligible),"target_submissions":0,"numeric_rows":0,"canonical_facts":0,"panel_rows":0})
+            diagnostics.append({"quarter":quarter.slug,"raw_submissions":len(raw_sub),"eligible_submissions":len(eligible),"target_submissions":0,"numeric_rows":0,"canonical_facts":0,"panel_rows":0,**raw_sample})
             continue
         raw_num=read_table(archive,"num")
         num=raw_num[raw_num["adsh"].isin(set(sub["adsh"]))].copy()
@@ -72,7 +72,7 @@ def build_sec_fundamentals(config,user_agent,cache_dir,diagnostics=None):
         if not panel.empty:
             panel["source_quarter"]=quarter.slug
             panels.append(panel)
-        diagnostics.append({"quarter":quarter.slug,"raw_submissions":len(raw_sub),"eligible_submissions":len(eligible),"target_submissions":len(sub),"numeric_rows":len(num),"canonical_facts":len(facts),"panel_rows":len(panel),"panel_filed_min":str(pd.to_datetime(panel["filed"]).min().date()) if len(panel) else None,"panel_filed_max":str(pd.to_datetime(panel["filed"]).max().date()) if len(panel) else None})
+        diagnostics.append({"quarter":quarter.slug,"raw_submissions":len(raw_sub),"eligible_submissions":len(eligible),"target_submissions":len(sub),"numeric_rows":len(num),"canonical_facts":len(facts),"panel_rows":len(panel),"panel_filed_min":str(pd.to_datetime(panel["filed"]).min().date()) if len(panel) else None,"panel_filed_max":str(pd.to_datetime(panel["filed"]).max().date()) if len(panel) else None,**raw_sample})
     if not panels:return pd.DataFrame()
     out=pd.concat(panels,ignore_index=True)
     out=out.sort_values(["cik","filed","adsh"]).drop_duplicates(["adsh"],keep="last")
