@@ -60,6 +60,7 @@ def build_sec_fundamentals(config,user_agent,cache_dir,diagnostics=None):
     for quarter in quarters(config):
         archive=client.download(quarter,cache_dir/"fsds")
         raw_sub=read_table(archive,"sub")
+        raw_sample={}
         eligible=eligible_submissions(raw_sub)
         sub=eligible[eligible["form"].isin(config.forms)].copy()
         if sub.empty:
