@@ -27,8 +27,14 @@ NUM_COLUMNS = ["adsh", "tag", "version", "ddate", "qtrs", "uom", "value", "coreg
 def eligible_submissions(sub: pd.DataFrame) -> pd.DataFrame:
     out = sub.copy()
     out = out[out["form"].isin(["10-K", "10-Q", "10-K/A", "10-Q/A"])]
-    out["filed"] = pd.to_datetime(out["filed"].astype(str), errors="coerce")
-    out["period"] = pd.to_datetime(out["period"].astype(str), errors="coerce")
+    filed_numeric = pd.to_numeric(out["filed"], errors="coerce").astype("Int64")
+    period_numeric = pd.to_numeric(out["period"], errors="coerce").astype("Int64")
+    out["filed"] = pd.to_datetime(
+        filed_numeric.astype("string"), format="%Y%m%d", errors="coerce"
+    )
+    out["period"] = pd.to_datetime(
+        period_numeric.astype("string"), format="%Y%m%d", errors="coerce"
+    )
     out = out.dropna(subset=["adsh", "cik", "filed", "period"])
     return out
 
