@@ -43,3 +43,14 @@ def audit_sec_cache(
     from finrisk.real_run import quarter_inventory
     config=CohortBuildConfig(start_year=start_year,end_year=end_year,end_quarter=end_quarter)
     typer.echo(quarter_inventory(cache_dir,config).to_string(index=False))
+
+
+@app.command("train-baseline")
+def train_baseline(
+    cohort: Path = typer.Option(..., exists=True, help="Source-hashed SEC cohort Parquet."),
+    out_dir: Path = typer.Option(Path("artifacts/modeling/baseline")),
+):
+    """Train and evaluate the chronological logistic-regression benchmark."""
+    from finrisk.modeling.baseline import run_baseline
+    evidence=run_baseline(cohort,out_dir)
+    typer.echo(json.dumps(evidence,indent=2))

@@ -3,7 +3,7 @@ name = "finrisk-ai"
 version = "0.4.0"
 description = "Point-in-time financial risk intelligence from SEC EDGAR fundamentals"
 requires-python = ">=3.11"
-dependencies = ["httpx>=0.27","pandas>=2.2","pyarrow>=17.0","pydantic>=2.8","typer>=0.12"]
+dependencies = ["httpx>=0.27","pandas>=2.2","pyarrow>=17.0","pydantic>=2.8","typer>=0.12","scikit-learn>=1.5"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3","ruff>=0.6"]
