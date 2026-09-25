@@ -61,6 +61,12 @@ def build_sec_fundamentals(config,user_agent,cache_dir,diagnostics=None):
         archive=client.download(quarter,cache_dir/"fsds")
         raw_sub=read_table(archive,"sub")
         raw_sample={}
+        for col in ("form","filed","period"):
+            if col in raw_sub.columns:
+                values=raw_sub[col].dropna().head(5)
+                raw_sample[f"{col}_dtype"]=str(raw_sub[col].dtype)
+                raw_sample[f"{col}_sample"]="|".join(map(str,values.tolist()))
+                raw_sample[f"{col}_nulls"]=int(raw_sub[col].isna().sum())
         eligible=eligible_submissions(raw_sub)
         sub=eligible[eligible["form"].isin(config.forms)].copy()
         if sub.empty:
