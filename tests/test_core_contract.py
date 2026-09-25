@@ -56,3 +56,12 @@ def test_eligible_submissions_parses_integer_sec_dates():
     assert len(out)==1
     assert out.loc[0,"filed"]==pd.Timestamp("2025-02-14")
     assert out.loc[0,"period"]==pd.Timestamp("2024-12-31")
+
+
+def test_eligibility_normalizes_float_period_dates():
+    from finrisk.dataset import eligible_submissions
+    f=pd.DataFrame({"adsh":["a","b"],"cik":[1,2],"form":["10-K","10-Q"],"filed":[20250228,20250515],"period":[20241231.0,20250331.0]})
+    out=eligible_submissions(f)
+    assert len(out)==2
+    assert out["filed"].dt.strftime("%Y-%m-%d").tolist()==["2025-02-28","2025-05-15"]
+    assert out["period"].dt.strftime("%Y-%m-%d").tolist()==["2024-12-31","2025-03-31"]
