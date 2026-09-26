@@ -174,3 +174,15 @@ def build_sec_historical_names_command(
     if not ua: raise typer.BadParameter("SEC_USER_AGENT is required")
     evidence=build_historical_cik_names(out_dir,ua)
     typer.echo(json.dumps(evidence,indent=2))
+
+
+@app.command("audit-historical-identity")
+def audit_historical_identity_command(
+    cohort: Path = typer.Option(..., exists=True),
+    ticker_map: Path = typer.Option(..., exists=True),
+    historical_names: Path = typer.Option(..., exists=True),
+    out_dir: Path = typer.Option(Path("artifacts/evidence/historical-identity")),
+):
+    from finrisk.evidence.historical_identity import audit_historical_identity
+    report=audit_historical_identity(cohort,ticker_map,historical_names,out_dir)
+    typer.echo(json.dumps(report,indent=2))
