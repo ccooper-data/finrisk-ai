@@ -32,6 +32,10 @@ def build_filing_names(ciks:set[str],start_year:int,end_year:int,out_dir:Path,us
     out=pd.concat(parts,ignore_index=True).drop_duplicates() if parts else pd.DataFrame()
     out_dir.mkdir(parents=True,exist_ok=True);out.to_parquet(out_dir/"sec_filing_names.parquet",index=False)
     manifest={"start_year":start_year,"end_year":end_year,"requested_ciks":len(wanted),
-              "matched_ciks":int(out["cik"].nunique()) if len(out) else 0,"rows":len(out),"sources":sources}
+              "matched_ciks":int(out["cik"].nunique()) if len(out) else 0,"rows":len(out),
+              "retrieved_quarters":sum(s.get("status")=="retrieved" for s in sources),
+              "unpublished_quarters":[{"year":s["year"],"quarter":s["quarter"],"http_status":s["http_status"]}
+                                      for s in sources if s.get("status")=="source_not_published"],
+              "sources":sources}
     (out_dir/"sec_filing_names_manifest.json").write_text(json.dumps(manifest,indent=2,sort_keys=True,default=str))
     return manifest
