@@ -2,7 +2,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import pandas as pd
-from finrisk.identity.sec_fsds_names import build_filing_names
+from finrisk.identity.sec_fsds_names import build_filing_names,normalize_cik
 from finrisk.identity.resolution import normalize_entity_name
 
 def hardcase_frame(identity:pd.DataFrame,limit:int=100)->pd.DataFrame:
@@ -14,15 +14,18 @@ def incremental_identity_report(identity:pd.DataFrame,filing_names:pd.DataFrame)
     for _,r in identity.iterrows():
         first=pd.Timestamp(r["first_filing"]);last=pd.Timestamp(r["last_filing"])
         eligible=last>=pd.Timestamp("2009-01-01")
-        observed=filing_names[filing_names["cik"].astype(str).eq(str(r["cik"]))] if len(filing_names) else pd.DataFrame()
-        frozen=set(normalize_entity_name(x) for x in (r["historical_names"] if isinstance(r["historical_names"],list) else []))
-        fsds=set(normalize_entity_name(x) for x in observed.get("name",pd.Series(dtype=str)).dropna())
+        cik=normalize_cik(r["cik"])
+        observed=filing_names[filing_names["cik"].map(normalize_cik).eq(cik)] if len(filing_names) else pd.DataFrame()
+        aliases=r["historical_names"] if isinstance(r["historical_names"],list) else []
+        frozen={normalize_entity_name(x) for x in aliases}
+        fsds={normalize_entity_name(x) for x in observed.get("name",pd.Series(dtype=str)).dropna()}
         new=sorted(x for x in fsds if x and x not in frozen)
-        rows.append({"cik":r["cik"],"first_filing":first,"last_filing":last,"fsds_eligible":eligible,
+        rows.append({"cik":cik,"first_filing":first,"last_filing":last,"fsds_eligible":eligible,
                      "fsds_observed":bool(len(observed)),"fsds_name_count":len(fsds),
                      "incremental_name_count":len(new),"incremental_names":new,
                      "status":"out_of_scope" if not eligible else ("observed" if len(observed) else "eligible_missing")})
-    d=pd.DataFrame(rows);eligible=d[d["fsds_eligible"]]
+    d=pd.DataFrame(rows)
+    eligible=d[d["fsds_eligible"]]
     report={"hard_cases":len(d),"eligible":len(eligible),"out_of_scope":int((~d["fsds_eligible"]).sum()),
             "eligible_observed":int(eligible["fsds_observed"].sum()),
             "eligible_missing":int((~eligible["fsds_observed"]).sum()),
