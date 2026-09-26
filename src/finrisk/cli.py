@@ -186,3 +186,12 @@ def audit_historical_identity_command(
     from finrisk.evidence.historical_identity import audit_historical_identity
     report=audit_historical_identity(cohort,ticker_map,historical_names,out_dir)
     typer.echo(json.dumps(report,indent=2))
+
+
+@app.command("eodhd-preflight")
+def eodhd_preflight_command():
+    import os
+    from finrisk.market.eodhd_preflight import eodhd_access_preflight
+    token=os.environ.get("EODHD_API_TOKEN","")
+    report=eodhd_access_preflight(token)
+    typer.echo(json.dumps(report,indent=2))
