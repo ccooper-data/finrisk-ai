@@ -223,3 +223,21 @@ def eodhd_discovery_diagnostic_command(
     detail,summary=discovery_diagnostic(pd.read_parquet(identity),adapter.fetch_security_master(),100,.45)
     write_diagnostic(out_dir,detail,summary)
     typer.echo(json.dumps(summary,indent=2))
+
+
+@app.command("build-hardcase-sec-aliases")
+def build_hardcase_sec_aliases_command(
+    identity: Path = typer.Option(..., exists=True),
+    out_dir: Path = typer.Option(Path("artifacts/identity/sec-hardcase-aliases")),
+    limit: int = typer.Option(100),
+):
+    import os
+    import pandas as pd
+    from finrisk.identity.sec_dated_aliases import build_dated_aliases
+    frame=pd.read_parquet(identity)
+    hard=frame[(frame["distress_observations"]>0)&(~frame["has_current_ticker"])].sort_values(["first_filing","distress_observations"],ascending=[True,False]).head(limit)
+    ua=os.environ.get("SEC_USER_AGENT","")
+    if not ua:
+        raise typer.BadParameter("SEC_USER_AGENT is required")
+    report=build_dated_aliases(hard["cik"].astype(str).tolist(),out_dir,ua)
+    typer.echo(json.dumps(report,indent=2))
