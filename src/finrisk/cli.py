@@ -162,3 +162,15 @@ def audit_ticker_coverage_command(
     from finrisk.evidence.ticker_coverage import ticker_coverage
     report=ticker_coverage(cohort,ticker_map,out)
     typer.echo(json.dumps(report,indent=2))
+
+
+@app.command("build-sec-historical-names")
+def build_sec_historical_names_command(
+    out_dir: Path = typer.Option(Path("artifacts/context/sec-historical-names")),
+):
+    import os
+    from finrisk.ingestion.sec_historical_names import build_historical_cik_names
+    ua=os.environ.get("SEC_USER_AGENT","")
+    if not ua: raise typer.BadParameter("SEC_USER_AGENT is required")
+    evidence=build_historical_cik_names(out_dir,ua)
+    typer.echo(json.dumps(evidence,indent=2))
