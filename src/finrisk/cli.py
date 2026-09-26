@@ -139,3 +139,15 @@ def run_macro_ablation_command(
     from finrisk.modeling.macro_ablation import run_macro_ablation
     evidence=run_macro_ablation(cohort,macro,out_dir)
     typer.echo(json.dumps(evidence,indent=2))
+
+
+@app.command("build-sec-ticker-map")
+def build_sec_ticker_map_command(
+    out_dir: Path = typer.Option(Path("artifacts/context/sec-tickers")),
+):
+    import os
+    from finrisk.ingestion.sec_tickers import build_sec_ticker_map
+    user_agent=os.environ.get("SEC_USER_AGENT","")
+    if not user_agent: raise typer.BadParameter("SEC_USER_AGENT is required")
+    evidence=build_sec_ticker_map(out_dir,user_agent)
+    typer.echo(json.dumps(evidence,indent=2))
