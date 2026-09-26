@@ -238,3 +238,22 @@ def analyze_fsds_hardcases_command(
         raise typer.BadParameter("SEC_USER_AGENT is required")
     report=build_hardcase_filing_names(identity,out_dir,ua,limit)
     typer.echo(json.dumps(report,indent=2))
+
+
+@app.command("measure-fsds-discovery-impact")
+def measure_fsds_discovery_impact_command(
+    identity: Path = typer.Option(..., exists=True),
+    filing_names: Path = typer.Option(..., exists=True),
+    out_dir: Path = typer.Option(Path("artifacts/identity/fsds-discovery-impact")),
+):
+    import os
+    import pandas as pd
+    from finrisk.market.eodhd import EODHDProbeAdapter
+    from finrisk.identity.fsds_discovery_impact import compare_discovery,write_impact
+    token=os.environ.get("EODHD_API_TOKEN","")
+    if not token:
+        raise typer.BadParameter("EODHD_API_TOKEN is required")
+    universe=EODHDProbeAdapter(token).fetch_security_master()
+    detail,report=compare_discovery(pd.read_parquet(identity),pd.read_parquet(filing_names),universe,.45,100)
+    write_impact(out_dir,detail,report)
+    typer.echo(json.dumps(report,indent=2))
