@@ -2,7 +2,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import pandas as pd
-from finrisk.identity.sec_fsds_names import build_filing_names
+from finrisk.identity.sec_fsds_names import build_filing_names,normalize_cik
 from finrisk.identity.resolution import normalize_entity_name
 
 def hardcase_frame(identity:pd.DataFrame,limit:int=100)->pd.DataFrame:
@@ -14,7 +14,7 @@ def incremental_identity_report(identity:pd.DataFrame,filing_names:pd.DataFrame)
     for _,r in identity.iterrows():
         first=pd.Timestamp(r["first_filing"]);last=pd.Timestamp(r["last_filing"])
         eligible=last>=pd.Timestamp("2009-01-01")
-        observed=filing_names[filing_names["cik"].astype(str).eq(str(r["cik"]))] if len(filing_names) else pd.DataFrame()
+        cik=normalize_cik(r["cik"])\n        observed=filing_names[filing_names["cik"].map(normalize_cik).eq(cik)] if len(filing_names) else pd.DataFrame()
         frozen=set(normalize_entity_name(x) for x in (r["historical_names"] if isinstance(r["historical_names"],list) else []))
         fsds=set(normalize_entity_name(x) for x in observed.get("name",pd.Series(dtype=str)).dropna())
         new=sorted(x for x in fsds if x and x not in frozen)
