@@ -65,3 +65,14 @@ def train_boosted_tree_command(
     from finrisk.modeling.boosted_tree import run_boosted_tree
     evidence=run_boosted_tree(cohort,out_dir)
     typer.echo(json.dumps(evidence,indent=2))
+
+
+@app.command("train-pytorch-mlp")
+def train_pytorch_mlp_command(
+    cohort: Path = typer.Option(..., exists=True),
+    out_dir: Path = typer.Option(Path("artifacts/modeling/pytorch-mlp")),
+):
+    """Train the PyTorch MLP on the frozen temporal population."""
+    from finrisk.modeling.pytorch_mlp import run_pytorch_mlp
+    evidence=run_pytorch_mlp(cohort,out_dir)
+    typer.echo(json.dumps(evidence,indent=2))
