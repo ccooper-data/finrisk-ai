@@ -195,3 +195,16 @@ def eodhd_preflight_command():
     token=os.environ.get("EODHD_API_TOKEN","")
     report=eodhd_access_preflight(token)
     typer.echo(json.dumps(report,indent=2))
+
+
+@app.command("eodhd-depth-probe")
+def eodhd_depth_probe_command(
+    identity: Path = typer.Option(..., exists=True),
+    out: Path = typer.Option(Path("artifacts/market/eodhd-depth-probe.json")),
+):
+    import os
+    import pandas as pd
+    from finrisk.market.eodhd_depth import run_depth_probe
+    report=run_depth_probe(pd.read_parquet(identity),os.environ.get("EODHD_API_TOKEN",""),3)
+    out.parent.mkdir(parents=True,exist_ok=True);out.write_text(json.dumps(report,indent=2,sort_keys=True))
+    typer.echo(json.dumps(report,indent=2))

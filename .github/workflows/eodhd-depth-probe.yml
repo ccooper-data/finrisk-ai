@@ -1,0 +1,30 @@
+name: Probe EODHD historical depth
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      EODHD_API_TOKEN: ${{ secrets.EODHD_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+      - uses: actions/download-artifact@v4
+        with:
+          name: finrisk-historical-identity-36252565871
+          path: artifacts/source/identity
+          github-token: ${{ github.token }}
+          run-id: 36252565871
+      - run: finrisk eodhd-depth-probe --identity artifacts/source/identity/historical_identity_master.parquet --out artifacts/market/eodhd-depth-probe.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: finrisk-eodhd-depth-probe-${{ github.run_id }}
+          path: artifacts/market/eodhd-depth-probe.json
+          if-no-files-found: error
+          retention-days: 30
