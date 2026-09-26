@@ -30,7 +30,11 @@ def build_filing_names(ciks:set[str],start_year:int,end_year:int,out_dir:Path,us
     for year in range(start_year,end_year+1):
         for q in range(1,5):
             df,e=fetch_sub(year,q,user_agent);sources.append(e)
+            if df.empty or "cik" not in df.columns:
+                e["matched_rows"]=0
+                continue
             hit=df[df["cik"].isin(wanted)]
+            e["matched_rows"]=int(len(hit))
             if len(hit):parts.append(hit)
     empty_cols=["adsh","cik","name","filed","form","period"]
     out=pd.concat(parts,ignore_index=True).drop_duplicates() if parts else pd.DataFrame(columns=empty_cols)
