@@ -151,3 +151,14 @@ def build_sec_ticker_map_command(
     if not user_agent: raise typer.BadParameter("SEC_USER_AGENT is required")
     evidence=build_sec_ticker_map(out_dir,user_agent)
     typer.echo(json.dumps(evidence,indent=2))
+
+
+@app.command("audit-ticker-coverage")
+def audit_ticker_coverage_command(
+    cohort: Path = typer.Option(..., exists=True),
+    ticker_map: Path = typer.Option(..., exists=True),
+    out: Path = typer.Option(Path("artifacts/context/ticker-coverage.json")),
+):
+    from finrisk.evidence.ticker_coverage import ticker_coverage
+    report=ticker_coverage(cohort,ticker_map,out)
+    typer.echo(json.dumps(report,indent=2))
