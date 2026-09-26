@@ -1,0 +1,34 @@
+name: Audit historical ticker coverage
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+      - uses: actions/download-artifact@v4
+        with:
+          name: finrisk-sec-cohort-full-36201584816
+          path: artifacts/source/sec
+          github-token: ${{ github.token }}
+          run-id: 36201584816
+      - uses: actions/download-artifact@v4
+        with:
+          name: finrisk-sec-ticker-map-36207168652
+          path: artifacts/source/tickers
+          github-token: ${{ github.token }}
+          run-id: 36207168652
+      - run: finrisk audit-ticker-coverage --cohort artifacts/source/sec/sec-cohort-full/sec_labeled_cohort.parquet --ticker-map artifacts/source/tickers/sec_ticker_map.parquet --out artifacts/evidence/ticker-coverage.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: finrisk-ticker-coverage-${{ github.run_id }}
+          path: artifacts/evidence/
+          if-no-files-found: error
+          retention-days: 30
