@@ -128,3 +128,14 @@ def validate_fred_command(
     from finrisk.evidence.fred_validation import validate_fred_context
     report=validate_fred_context(context,out)
     typer.echo(json.dumps(report,indent=2))
+
+
+@app.command("run-macro-ablation")
+def run_macro_ablation_command(
+    cohort: Path = typer.Option(..., exists=True),
+    macro: Path = typer.Option(..., exists=True),
+    out_dir: Path = typer.Option(Path("artifacts/modeling/macro-ablation")),
+):
+    from finrisk.modeling.macro_ablation import run_macro_ablation
+    evidence=run_macro_ablation(cohort,macro,out_dir)
+    typer.echo(json.dumps(evidence,indent=2))
