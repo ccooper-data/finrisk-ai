@@ -1,0 +1,28 @@
+name: Train TensorFlow GRU
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -e ".[dev,ml]"
+      - run: pytest -q
+      - uses: actions/download-artifact@v4
+        with:
+          name: finrisk-sec-cohort-full-36201584816
+          path: artifacts/source
+          github-token: ${{ github.token }}
+          run-id: 36201584816
+      - run: finrisk train-tensorflow-gru --cohort artifacts/source/sec-cohort-full/sec_labeled_cohort.parquet --out-dir artifacts/modeling/tensorflow-gru
+      - uses: actions/upload-artifact@v4
+        with:
+          name: finrisk-tensorflow-gru-${{ github.run_id }}
+          path: artifacts/modeling/tensorflow-gru/
+          if-no-files-found: error
+          retention-days: 30
