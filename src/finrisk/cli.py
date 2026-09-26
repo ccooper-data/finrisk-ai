@@ -276,3 +276,23 @@ def measure_fsds_candidate_strength_command(
     detail,report=candidate_strength(pd.read_parquet(identity),pd.read_parquet(filing_names),universe,.45,100)
     write_strength(out_dir,detail,report)
     typer.echo(json.dumps(report,indent=2))
+
+
+@app.command("build-sec-identifier-retrieval-plan")
+def build_sec_identifier_retrieval_plan_command(
+    candidate_strength: Path = typer.Option(..., exists=True),
+    filing_names: Path = typer.Option(..., exists=True),
+    out_dir: Path = typer.Option(Path("artifacts/identity/sec-identifier-retrieval-plan")),
+):
+    import pandas as pd
+    from finrisk.identity.sec_identifier_targets import select_identifier_targets,target_summary
+    from finrisk.identity.sec_filing_retrieval_plan import filing_retrieval_plan,retrieval_summary
+    strength=pd.read_parquet(candidate_strength);names=pd.read_parquet(filing_names)
+    targets=select_identifier_targets(strength,56)
+    plan=filing_retrieval_plan(targets,names,6)
+    out_dir.mkdir(parents=True,exist_ok=True)
+    targets.to_parquet(out_dir/"identifier_targets.parquet",index=False)
+    plan.to_parquet(out_dir/"filing_retrieval_plan.parquet",index=False)
+    report={"targets":target_summary(targets),"retrieval":retrieval_summary(plan)}
+    (out_dir/"filing_retrieval_plan.json").write_text(json.dumps(report,indent=2,sort_keys=True))
+    typer.echo(json.dumps(report,indent=2))
