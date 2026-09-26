@@ -34,8 +34,11 @@ def build_sequence_arrays(frame:pd.DataFrame,split:TemporalSplit=TemporalSplit()
     base=[c for c in SEQUENCE_FEATURES if c in x.columns]
     x,derived=add_change_features(x,base);features=base+derived
     train_mask=x["filed"]<=pd.Timestamp(split.train_end)
+    observed=[col for col in features if x.loc[train_mask,col].notna().any()]
+    features=observed
     imputer=SimpleImputer(strategy="median",add_indicator=False);scaler=StandardScaler()
-    imputer.fit(x.loc[train_mask,features]);scaler.fit(imputer.transform(x.loc[train_mask,features]))
+    train_matrix=imputer.fit_transform(x.loc[train_mask,features])
+    scaler.fit(train_matrix)
     transformed=scaler.transform(imputer.transform(x[features])).astype("float32")
     x["_row"]=np.arange(len(x));seqs=[];labels=[];dates=[];ciks=[];lengths=[]
     for cik,g in x.groupby("cik",sort=False):
