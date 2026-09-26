@@ -1,0 +1,23 @@
+name: Build SEC ticker map
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+      - run: finrisk build-sec-ticker-map --out-dir artifacts/context/sec-tickers
+      - uses: actions/upload-artifact@v4
+        with:
+          name: finrisk-sec-ticker-map-${{ github.run_id }}
+          path: artifacts/context/sec-tickers/
+          if-no-files-found: error
+          retention-days: 30
