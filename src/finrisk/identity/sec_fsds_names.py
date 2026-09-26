@@ -32,13 +32,17 @@ def build_filing_names(ciks:set[str],start_year:int,end_year:int,out_dir:Path,us
             df,e=fetch_sub(year,q,user_agent);sources.append(e)
             hit=df[df["cik"].isin(wanted)]
             if len(hit):parts.append(hit)
-    out=pd.concat(parts,ignore_index=True).drop_duplicates() if parts else pd.DataFrame()
+    empty_cols=["adsh","cik","name","filed","form","period"]
+    out=pd.concat(parts,ignore_index=True).drop_duplicates() if parts else pd.DataFrame(columns=empty_cols)
     out_dir.mkdir(parents=True,exist_ok=True);out.to_parquet(out_dir/"sec_filing_names.parquet",index=False)
     manifest={"start_year":start_year,"end_year":end_year,"requested_ciks":len(wanted),
               "matched_ciks":int(out["cik"].nunique()) if len(out) else 0,"rows":len(out),
               "retrieved_quarters":sum(s.get("status")=="retrieved" for s in sources),
               "unpublished_quarters":[{"year":s["year"],"quarter":s["quarter"],"http_status":s["http_status"]}
                                       for s in sources if s.get("status")=="source_not_published"],
+              "requested_cik_examples":sorted(wanted)[:10],
+              "total_source_rows":sum(int(s.get("rows",0)) for s in sources),
+              "total_matched_rows":sum(int(s.get("matched_rows",0)) for s in sources),
               "sources":sources}
     (out_dir/"sec_filing_names_manifest.json").write_text(json.dumps(manifest,indent=2,sort_keys=True,default=str))
     return manifest
