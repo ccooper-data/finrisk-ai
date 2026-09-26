@@ -1,0 +1,39 @@
+name: Measure FSDS candidate strength
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  strength:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      EODHD_API_TOKEN: ${{ secrets.EODHD_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: python -m compileall -q src
+      - run: pytest -q
+      - uses: actions/download-artifact@v4
+        with:
+          name: finrisk-historical-identity-36252565871
+          path: artifacts/source/identity
+          github-token: ${{ github.token }}
+          run-id: 36252565871
+      - uses: actions/download-artifact@v4
+        with:
+          name: finrisk-fsds-hardcases-36274638237
+          path: artifacts/source/fsds
+          github-token: ${{ github.token }}
+          run-id: 36274638237
+      - run: finrisk measure-fsds-candidate-strength --identity artifacts/source/identity/historical_identity_master.parquet --filing-names artifacts/source/fsds/sec_filing_names.parquet --out-dir artifacts/identity/fsds-candidate-strength
+      - uses: actions/upload-artifact@v4
+        with:
+          name: finrisk-fsds-candidate-strength-${{ github.run_id }}
+          path: artifacts/identity/fsds-candidate-strength/
+          if-no-files-found: error
+          retention-days: 30
