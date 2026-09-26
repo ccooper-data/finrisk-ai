@@ -223,3 +223,18 @@ def eodhd_discovery_diagnostic_command(
     detail,summary=discovery_diagnostic(pd.read_parquet(identity),adapter.fetch_security_master(),100,.45)
     write_diagnostic(out_dir,detail,summary)
     typer.echo(json.dumps(summary,indent=2))
+
+
+@app.command("analyze-fsds-hardcases")
+def analyze_fsds_hardcases_command(
+    identity: Path = typer.Option(..., exists=True),
+    out_dir: Path = typer.Option(Path("artifacts/identity/fsds-hardcases")),
+    limit: int = typer.Option(100),
+):
+    import os
+    from finrisk.identity.fsds_hardcase import build_hardcase_filing_names
+    ua=os.environ.get("SEC_USER_AGENT","")
+    if not ua:
+        raise typer.BadParameter("SEC_USER_AGENT is required")
+    report=build_hardcase_filing_names(identity,out_dir,ua,limit)
+    typer.echo(json.dumps(report,indent=2))
