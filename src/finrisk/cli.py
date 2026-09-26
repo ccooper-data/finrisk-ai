@@ -107,3 +107,14 @@ def train_tensorflow_gru_command(
     from finrisk.modeling.tensorflow_gru import run_tensorflow_gru
     evidence=run_tensorflow_gru(cohort,out_dir)
     typer.echo(json.dumps(evidence,indent=2))
+
+
+@app.command("build-fred-macro")
+def build_fred_macro_command(
+    out_dir: Path = typer.Option(Path("artifacts/context/fred")),
+    start: str = typer.Option("2008-01-01"),
+):
+    """Build source-hashed FRED macro context."""
+    from finrisk.ingestion.fred import build_macro_context
+    manifest=build_macro_context(out_dir,start)
+    typer.echo(json.dumps(manifest,indent=2))
