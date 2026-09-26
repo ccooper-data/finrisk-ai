@@ -118,3 +118,13 @@ def build_fred_macro_command(
     from finrisk.ingestion.fred import build_macro_context
     manifest=build_macro_context(out_dir,start)
     typer.echo(json.dumps(manifest,indent=2))
+
+
+@app.command("validate-fred")
+def validate_fred_command(
+    context: Path = typer.Option(..., exists=True),
+    out: Path = typer.Option(Path("artifacts/context/fred/fred_validation.json")),
+):
+    from finrisk.evidence.fred_validation import validate_fred_context
+    report=validate_fred_context(context,out)
+    typer.echo(json.dumps(report,indent=2))
