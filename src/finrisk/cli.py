@@ -208,3 +208,18 @@ def eodhd_depth_probe_command(
     report=run_depth_probe(pd.read_parquet(identity),os.environ.get("EODHD_API_TOKEN",""),3)
     out.parent.mkdir(parents=True,exist_ok=True);out.write_text(json.dumps(report,indent=2,sort_keys=True))
     typer.echo(json.dumps(report,indent=2))
+
+
+@app.command("eodhd-discovery-diagnostic")
+def eodhd_discovery_diagnostic_command(
+    identity: Path = typer.Option(..., exists=True),
+    out_dir: Path = typer.Option(Path("artifacts/market/eodhd-discovery-diagnostic")),
+):
+    import os
+    import pandas as pd
+    from finrisk.market.eodhd import EODHDProbeAdapter
+    from finrisk.identity.discovery_diagnostics import discovery_diagnostic,write_diagnostic
+    adapter=EODHDProbeAdapter(os.environ.get("EODHD_API_TOKEN",""))
+    detail,summary=discovery_diagnostic(pd.read_parquet(identity),adapter.fetch_security_master(),100,.45)
+    write_diagnostic(out_dir,detail,summary)
+    typer.echo(json.dumps(summary,indent=2))
