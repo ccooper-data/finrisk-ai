@@ -257,3 +257,22 @@ def measure_fsds_discovery_impact_command(
     detail,report=compare_discovery(pd.read_parquet(identity),pd.read_parquet(filing_names),universe,.45,100)
     write_impact(out_dir,detail,report)
     typer.echo(json.dumps(report,indent=2))
+
+
+@app.command("measure-fsds-candidate-strength")
+def measure_fsds_candidate_strength_command(
+    identity: Path = typer.Option(..., exists=True),
+    filing_names: Path = typer.Option(..., exists=True),
+    out_dir: Path = typer.Option(Path("artifacts/identity/fsds-candidate-strength")),
+):
+    import os
+    import pandas as pd
+    from finrisk.market.eodhd import EODHDProbeAdapter
+    from finrisk.identity.fsds_candidate_strength import candidate_strength,write_strength
+    token=os.environ.get("EODHD_API_TOKEN","")
+    if not token:
+        raise typer.BadParameter("EODHD_API_TOKEN is required")
+    universe=EODHDProbeAdapter(token).fetch_security_master()
+    detail,report=candidate_strength(pd.read_parquet(identity),pd.read_parquet(filing_names),universe,.45,100)
+    write_strength(out_dir,detail,report)
+    typer.echo(json.dumps(report,indent=2))
