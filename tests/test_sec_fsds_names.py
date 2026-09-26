@@ -1,3 +1,4 @@
+import pandas as pd
 from finrisk.identity.sec_fsds_names import quarter_url
 
 def test_sec_fsds_quarter_url_is_deterministic():
