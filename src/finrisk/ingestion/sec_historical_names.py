@@ -5,6 +5,19 @@ import httpx,pandas as pd
 
 SEC_CIK_NAMES="https://www.sec.gov/Archives/edgar/cik-lookup-data.txt"
 
+def parse_cik_name_line(line:str):
+    stripped=line.rstrip()
+    if stripped.endswith(":"):
+        stripped=stripped[:-1]
+    if ":" not in stripped:
+        return None
+    name,cik=stripped.rsplit(":",1)
+    cik=cik.strip()
+    if not cik.isdigit():
+        return None
+    return cik.zfill(10),name.strip()
+
+
 def build_historical_cik_names(out_dir:Path,user_agent:str)->dict:
     r=httpx.get(SEC_CIK_NAMES,headers={"User-Agent":user_agent,"Accept-Encoding":"gzip, deflate"},timeout=120)
     r.raise_for_status();raw=r.content;rows=[]
