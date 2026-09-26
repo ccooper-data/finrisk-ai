@@ -76,3 +76,14 @@ def train_pytorch_mlp_command(
     from finrisk.modeling.pytorch_mlp import run_pytorch_mlp
     evidence=run_pytorch_mlp(cohort,out_dir)
     typer.echo(json.dumps(evidence,indent=2))
+
+
+@app.command("train-tensorflow-mlp")
+def train_tensorflow_mlp_command(
+    cohort: Path = typer.Option(..., exists=True),
+    out_dir: Path = typer.Option(Path("artifacts/modeling/tensorflow-mlp")),
+):
+    """Train the TensorFlow MLP on the frozen temporal population."""
+    from finrisk.modeling.tensorflow_mlp import run_tensorflow_mlp
+    evidence=run_tensorflow_mlp(cohort,out_dir)
+    typer.echo(json.dumps(evidence,indent=2))
