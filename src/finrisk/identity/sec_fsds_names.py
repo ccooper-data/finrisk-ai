@@ -9,6 +9,9 @@ def quarter_url(year:int,quarter:int)->str:
 def fetch_sub(year:int,quarter:int,user_agent:str)->tuple[pd.DataFrame,dict]:
     url=quarter_url(year,quarter)
     r=httpx.get(url,headers={"User-Agent":user_agent,"Accept-Encoding":"gzip, deflate"},timeout=180)
+    if r.status_code==404:
+        return pd.DataFrame(),{"year":year,"quarter":quarter,"source":url,"status":"source_not_published",
+                              "http_status":404,"sha256":None,"bytes":0,"rows":0}
     r.raise_for_status()
     with zipfile.ZipFile(io.BytesIO(r.content)) as z:
         names={n.lower():n for n in z.namelist()}
