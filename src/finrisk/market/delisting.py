@@ -9,7 +9,7 @@ def validate_delistings(df:pd.DataFrame)->None:
     if df.duplicated(["security_id","delist_date"]).any():raise ValueError("Duplicate security/delist-date rows")
 
 def apply_delisting_returns(prices:pd.DataFrame,delistings:pd.DataFrame)->pd.DataFrame:
-    validate_delistings(delistings);p=prices.copy();p["date"]=pd.to_datetime(p["date"])
+    validate_delistings(delistings);p=prices.copy()\n    if "date" in p.columns:p["date"]=pd.to_datetime(p["date"])
     d=delistings.copy();d["delist_date"]=pd.to_datetime(d["delist_date"])
     rows=[]
     for _,r in d.iterrows():
