@@ -87,3 +87,13 @@ def train_tensorflow_mlp_command(
     from finrisk.modeling.tensorflow_mlp import run_tensorflow_mlp
     evidence=run_tensorflow_mlp(cohort,out_dir)
     typer.echo(json.dumps(evidence,indent=2))
+
+
+@app.command("train-pytorch-gru")
+def train_pytorch_gru_command(
+    cohort: Path = typer.Option(..., exists=True),
+    out_dir: Path = typer.Option(Path("artifacts/modeling/pytorch-gru")),
+):
+    from finrisk.modeling.pytorch_gru import run_pytorch_gru
+    evidence=run_pytorch_gru(cohort,out_dir)
+    typer.echo(json.dumps(evidence,indent=2))
