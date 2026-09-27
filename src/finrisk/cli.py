@@ -334,3 +334,15 @@ def measure_tier_a_corroboration_command(
     from finrisk.identity.tier_a_corroboration import write_corroboration
     report=write_corroboration(pd.read_parquet(evidence),out_dir)
     typer.echo(json.dumps(report,indent=2))
+
+
+@app.command("intersect-tier-a-identifiers")
+def intersect_tier_a_identifiers_command(
+    corroboration: Path = typer.Option(..., exists=True),
+    targets: Path = typer.Option(..., exists=True),
+    out_dir: Path = typer.Option(Path("artifacts/identity/tier-a-identifier-intersection")),
+):
+    import pandas as pd
+    from finrisk.identity.isin_cusip_intersection import write_intersection
+    report=write_intersection(pd.read_parquet(corroboration),pd.read_parquet(targets),out_dir)
+    typer.echo(json.dumps(report,indent=2))
