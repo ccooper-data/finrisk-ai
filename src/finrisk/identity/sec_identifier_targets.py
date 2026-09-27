@@ -3,10 +3,15 @@ import pandas as pd
 
 def select_identifier_targets(candidate_strength:pd.DataFrame,max_targets:int=56)->pd.DataFrame:
     x=candidate_strength.copy()
-    required={"cik","top_security_id","top_score","margin","isin_present","is_delisted"}
+    required={"cik","top_security_id","top_score","margin","isin","isin_present","is_delisted"}
     missing=required-set(x.columns)
     if missing:raise ValueError(f"Missing fields: {sorted(missing)}")
-    x=x[(x["isin_present"].eq(True))&(x["top_security_id"].notna())].copy()
+    normalized=x["isin"].fillna("").astype(str).str.strip().str.upper()
+    inconsistent=x["isin_present"].eq(True)&normalized.eq("")
+    if inconsistent.any():
+        raise ValueError("Candidate strength marks ISIN present but does not preserve the ISIN value")
+    x["isin"]=normalized.mask(normalized.eq(""),None)
+    x=x[(x["isin_present"].eq(True))&(x["isin"].notna())&(x["top_security_id"].notna())].copy()
     x["target_priority"]=x.apply(lambda r:
         "A_high_margin_isin" if r["top_score"]>=.90 and r["margin"]>=.08 else
         "B_strong_ambiguous_isin" if r["top_score"]>=.90 else
