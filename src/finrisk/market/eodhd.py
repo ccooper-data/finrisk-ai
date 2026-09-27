@@ -13,7 +13,7 @@ class EODHDProbeAdapter(GovernedMarketAdapter):
     @property
     def capabilities(self):
         # Documentary claims must still be verified by the empirical probe.
-        return ProviderCapabilities("EODHD",True,False,True,True,True,True,True)
+        return ProviderCapabilities("EODHD",True,False,False,True,True,True,False)
     def _get(self,path,params=None):
         q={"api_token":self.token,"fmt":"json",**(params or {})}
         r=httpx.get(f"{self.base}/{path}",params=q,timeout=120);r.raise_for_status();return r.json()
@@ -24,7 +24,7 @@ class EODHDProbeAdapter(GovernedMarketAdapter):
             for x in data:
                 code=str(x.get("Code",""));isin=x.get("Isin")
                 rows.append({"security_id":f"{code}.US","issuer_id":isin or code,"security_name":x.get("Name"),
-                  "valid_from":"1900-01-01","valid_to":"2100-01-01","source":"EODHD",
+                  "valid_from":None,"valid_to":None,"source":"EODHD",
                   "source_identifier":f"{code}.US","ticker":code,"isin":isin,"is_delisted":bool(delisted)})
         return pd.DataFrame(rows)
     def fetch_prices(self,security_ids:list[str],start:str,end:str)->pd.DataFrame:
