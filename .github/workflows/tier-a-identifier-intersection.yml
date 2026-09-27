@@ -24,10 +24,10 @@ jobs:
           run-id: 36286992818
       - uses: actions/download-artifact@v4
         with:
-          name: finrisk-sec-identifier-retrieval-plan-36280211592
+          name: finrisk-sec-identifier-retrieval-plan-36290730664
           path: artifacts/source/targets
           github-token: ${{ github.token }}
-          run-id: 36280211592
+          run-id: 36290730664
       - run: finrisk intersect-tier-a-identifiers --corroboration artifacts/source/corroboration/tier_a_corroboration_candidates.parquet --targets artifacts/source/targets/identifier_targets.parquet --out-dir artifacts/identity/tier-a-identifier-intersection
       - uses: actions/upload-artifact@v4
         with:
