@@ -12,3 +12,16 @@ def test_intersection_requires_multi_accession_exact_identifier():
     d,r=identifier_intersection(c,t)
     assert r["exact_cusip_matches"]==1 and r["targets_with_exact_match"]==1
     assert d.loc[d["identifier_match"],"review_status"].iloc[0]=="unreviewed"
+
+
+def test_relationship_classification_keeps_exact_gate():
+    c=pd.DataFrame({"cik":["1","1","1"],"candidate_security_id":["A.US"]*3,"identifier_type":["CUSIP"]*3,
+                    "identifier":["037833101","037833250","999999999"],"independent_accessions":[2,2,2]})
+    t=pd.DataFrame({"cik":["1"],"top_security_id":["A.US"],"isin":["US0378331005"],"target_priority":["A_high_margin_isin"]})
+    d,r=identifier_intersection(c,t)
+    assert d["identifier_relationship"].tolist()==[
+        "same_security_body_check_digit_difference",
+        "same_issuer_root_different_issue",
+        "different_issuer_root",
+    ]
+    assert r["exact_cusip_matches"]==0
