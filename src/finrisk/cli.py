@@ -312,3 +312,14 @@ def run_sec_tier_a_identifier_pilot_command(
         raise typer.BadParameter("SEC_USER_AGENT is required")
     report=run_tier_a_pilot(pd.read_parquet(targets),pd.read_parquet(retrieval_plan),ua,out_dir)
     typer.echo(json.dumps(report,indent=2))
+
+
+@app.command("measure-tier-a-evidence-quality")
+def measure_tier_a_evidence_quality_command(
+    evidence: Path = typer.Option(..., exists=True),
+    out_dir: Path = typer.Option(Path("artifacts/identity/tier-a-evidence-quality")),
+):
+    import pandas as pd
+    from finrisk.identity.tier_a_evidence_quality import write_quality
+    report=write_quality(pd.read_parquet(evidence),out_dir)
+    typer.echo(json.dumps(report,indent=2))
