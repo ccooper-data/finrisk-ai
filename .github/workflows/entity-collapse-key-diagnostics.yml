@@ -1,0 +1,31 @@
+name: Diagnose entity collapse keys
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: python -m compileall -q src scripts
+      - run: pytest -q
+      - uses: actions/download-artifact@v4
+        with:
+          name: finrisk-fsds-candidate-strength-36338761839
+          path: artifacts/source/strength
+          github-token: ${{ github.token }}
+          run-id: 36338761839
+      - run: python scripts/diagnose_entity_collapse_keys.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: finrisk-entity-collapse-key-diagnostics-${{ github.run_id }}
+          path: artifacts/identity/entity-collapse-key-diagnostics/
+          if-no-files-found: error
+          retention-days: 30
