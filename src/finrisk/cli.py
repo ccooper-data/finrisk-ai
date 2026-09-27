@@ -296,3 +296,19 @@ def build_sec_identifier_retrieval_plan_command(
     report={"targets":target_summary(targets),"retrieval":retrieval_summary(plan)}
     (out_dir/"filing_retrieval_plan.json").write_text(json.dumps(report,indent=2,sort_keys=True))
     typer.echo(json.dumps(report,indent=2))
+
+
+@app.command("run-sec-tier-a-identifier-pilot")
+def run_sec_tier_a_identifier_pilot_command(
+    targets: Path = typer.Option(..., exists=True),
+    retrieval_plan: Path = typer.Option(..., exists=True),
+    out_dir: Path = typer.Option(Path("artifacts/identity/sec-tier-a-identifier-pilot")),
+):
+    import os
+    import pandas as pd
+    from finrisk.identity.sec_tier_a_pilot_runner import run_tier_a_pilot
+    ua=os.environ.get("SEC_USER_AGENT","")
+    if not ua:
+        raise typer.BadParameter("SEC_USER_AGENT is required")
+    report=run_tier_a_pilot(pd.read_parquet(targets),pd.read_parquet(retrieval_plan),ua,out_dir)
+    typer.echo(json.dumps(report,indent=2))
