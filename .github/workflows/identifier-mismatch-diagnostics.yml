@@ -1,0 +1,31 @@
+name: Diagnose Tier-A identifier mismatches
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: python -m compileall -q src
+      - run: pytest -q
+      - uses: actions/download-artifact@v4
+        with:
+          name: finrisk-tier-a-identifier-intersection-36291257490
+          path: artifacts/source/intersection
+          github-token: ${{ github.token }}
+          run-id: 36291257490
+      - run: finrisk diagnose-tier-a-identifier-mismatches --intersection artifacts/source/intersection/tier_a_identifier_intersection.parquet --out-dir artifacts/identity/identifier-mismatch-diagnostics
+      - uses: actions/upload-artifact@v4
+        with:
+          name: finrisk-identifier-mismatch-diagnostics-${{ github.run_id }}
+          path: artifacts/identity/identifier-mismatch-diagnostics/
+          if-no-files-found: error
+          retention-days: 30
