@@ -323,3 +323,14 @@ def measure_tier_a_evidence_quality_command(
     from finrisk.identity.tier_a_evidence_quality import write_quality
     report=write_quality(pd.read_parquet(evidence),out_dir)
     typer.echo(json.dumps(report,indent=2))
+
+
+@app.command("measure-tier-a-corroboration")
+def measure_tier_a_corroboration_command(
+    evidence: Path = typer.Option(..., exists=True),
+    out_dir: Path = typer.Option(Path("artifacts/identity/tier-a-corroboration")),
+):
+    import pandas as pd
+    from finrisk.identity.tier_a_corroboration import write_corroboration
+    report=write_corroboration(pd.read_parquet(evidence),out_dir)
+    typer.echo(json.dumps(report,indent=2))
