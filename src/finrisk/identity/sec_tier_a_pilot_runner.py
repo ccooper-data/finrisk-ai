@@ -10,7 +10,7 @@ from finrisk.identity.identifier_corroboration import extract_identifiers
 from finrisk.identity.sec_identifier_context import contextualize_identifiers
 
 def run_tier_a_pilot(targets:pd.DataFrame,plan:pd.DataFrame,user_agent:str,out_dir:Path)->dict:
-    pilot=tier_a_pilot_plan(targets,plan);rows=[];docs_seen=0
+    pilot=tier_a_pilot_plan(targets,plan);rows=[];docs_seen=0;docs_skipped_oversize=0;docs_failed=0
     headers={"User-Agent":user_agent,"Accept-Encoding":"gzip, deflate"}
     with httpx.Client(headers=headers,timeout=60) as client:
         for _,p in pilot.iterrows():
@@ -19,7 +19,7 @@ def run_tier_a_pilot(targets:pd.DataFrame,plan:pd.DataFrame,user_agent:str,out_d
             docs=accession_documents(index,base)
             selected=select_accession_documents(docs,None,8);validate_selected_urls(selected,base)
             for d in selected:
-                text,ev=fetch_document(d["url"],user_agent,base,client);docs_seen+=1
+                try:\n                    text,ev=fetch_document(d["url"],user_agent,base,client)\n                except ValueError as exc:\n                    if "exceeds" in str(exc):\n                        docs_skipped_oversize+=1\n                        continue\n                    raise\n                except httpx.HTTPError:\n                    docs_failed+=1\n                    continue\n                docs_seen+=1
                 ids=extract_identifiers(text)
                 for kind,values in [("CUSIP",ids["cusips"]),("ISIN",ids["isins"])]:
                     ctx=contextualize_identifiers(text,values)
@@ -35,6 +35,7 @@ def run_tier_a_pilot(targets:pd.DataFrame,plan:pd.DataFrame,user_agent:str,out_d
     out_dir.mkdir(parents=True,exist_ok=True);evidence.to_parquet(out_dir/"tier_a_identifier_evidence.parquet",index=False)
     report={**pilot_summary(pilot),"documents_fetched":docs_seen,"identifier_evidence_rows":len(evidence),
             "common_equity_rows":int(evidence["common_equity_context"].sum()) if len(evidence) else 0,
-            "targets_with_identifier_evidence":int(evidence["cik"].nunique()) if len(evidence) else 0}
+            "targets_with_identifier_evidence":int(evidence["cik"].nunique()) if len(evidence) else 0,
+            "documents_skipped_oversize":docs_skipped_oversize,"documents_http_failed":docs_failed}
     (out_dir/"tier_a_identifier_pilot.json").write_text(json.dumps(report,indent=2,sort_keys=True))
     return report
