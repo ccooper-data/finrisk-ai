@@ -1,0 +1,29 @@
+name: Diagnose EODHD ISIN coverage
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      EODHD_API_TOKEN: ${{ secrets.EODHD_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: python -m compileall -q src scripts
+      - run: pytest -q
+      - run: python scripts/diagnose_eodhd_isin_coverage.py | tee isin_coverage_report.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: finrisk-eodhd-isin-coverage-${{ github.run_id }}
+          path: |
+            isin_coverage_report.json
+            isin_coverage_by_delisted_status.csv
+          if-no-files-found: error
+          retention-days: 30
