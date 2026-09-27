@@ -18,10 +18,10 @@ jobs:
       - run: pytest -q
       - uses: actions/download-artifact@v4
         with:
-          name: finrisk-fsds-candidate-strength-36278091997
+          name: finrisk-fsds-candidate-strength-36289812345
           path: artifacts/source/strength
           github-token: ${{ github.token }}
-          run-id: 36278091997
+          run-id: 36289812345
       - uses: actions/download-artifact@v4
         with:
           name: finrisk-fsds-hardcases-36274638237
