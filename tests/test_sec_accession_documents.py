@@ -10,3 +10,14 @@ def test_selects_primary_and_ex2_ex4_text_only():
 
 def test_selected_document_cannot_escape_accession():
     with pytest.raises(ValueError):validate_selected_urls([{"url":"https://x/other/a.htm"}],"https://x/a")
+
+
+def test_no_primary_metadata_falls_back_to_bounded_text_documents():
+    docs=[
+        {"name":"company-20101231x10k.htm","url":"https://www.sec.gov/Archives/edgar/data/1/abc/company-20101231x10k.htm"},
+        {"name":"random.xml","url":"https://www.sec.gov/Archives/edgar/data/1/abc/random.xml"},
+        {"name":"notes.txt","url":"https://www.sec.gov/Archives/edgar/data/1/abc/notes.txt"},
+    ]
+    selected=select_accession_documents(docs,None,8)
+    assert [x["name"] for x in selected]==["company-20101231x10k.htm","notes.txt"]
+    assert all(x["selection_reason"]=="textual_accession_fallback" for x in selected)
