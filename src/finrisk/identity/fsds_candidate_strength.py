@@ -6,6 +6,15 @@ from finrisk.identity.candidate_discovery import discover_candidates
 from finrisk.identity.fsds_discovery_impact import alias_map
 from finrisk.identity.sec_fsds_names import normalize_cik
 
+def _candidate_isin(top_row)->str|None:
+    if top_row is None:
+        return None
+    value=top_row.get("isin")
+    if pd.isna(value):
+        return None
+    normalized=str(value).strip().upper()
+    return normalized or None
+
 def candidate_strength(identity:pd.DataFrame,filing_names:pd.DataFrame,universe:pd.DataFrame,
                        min_score:float=.45,limit:int=100)->tuple[pd.DataFrame,dict]:
     amap=alias_map(filing_names);rows=[]
@@ -19,11 +28,12 @@ def candidate_strength(identity:pd.DataFrame,filing_names:pd.DataFrame,universe:
         second=float(cand.loc[1,"discovery_score"]) if len(cand)>1 else None
         margin=(top-second) if top is not None and second is not None else (top if top is not None else None)
         top_row=cand.iloc[0] if len(cand) else None
+        isin=_candidate_isin(top_row)
         rows.append({"cik":cik,"candidate_count":len(cand),"top_security_id":top_row["security_id"] if top_row is not None else None,
                      "top_security_name":top_row["security_name"] if top_row is not None else None,
                      "top_score":top,"second_score":second,"margin":margin,
                      "is_delisted":bool(top_row["is_delisted"]) if top_row is not None and pd.notna(top_row.get("is_delisted")) else None,
-                     "isin_present":bool(top_row is not None and pd.notna(top_row.get("isin")) and str(top_row.get("isin")).strip()),
+                     "isin":isin,"isin_present":isin is not None,
                      "high_margin":bool(top is not None and top>=.90 and margin is not None and margin>=.08)})
     d=pd.DataFrame(rows)
     report={"issuers":len(d),"with_candidate":int((d["candidate_count"]>0).sum()),
