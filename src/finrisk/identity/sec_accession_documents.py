@@ -4,6 +4,7 @@ from pathlib import PurePosixPath
 
 TEXT_EXT={".htm",".html",".txt"}
 EXHIBIT_NAME_RE=re.compile(r"(?:^|[-_])ex(?:hibit)?[-_]?(2|4)(?:[._-]|$)",re.I)
+INDEX_NAME_RE=re.compile(r"(?:^|[-_])(index|header)(?:[._-]|$)",re.I)
 
 def select_accession_documents(documents:list[dict],primary_document:str|None=None,max_documents:int=8)->list[dict]:
     chosen=[];seen=set()
@@ -13,11 +14,20 @@ def select_accession_documents(documents:list[dict],primary_document:str|None=No
     if primary_document:
         for d in documents:
             if d["name"]==primary_document:add(d,"primary_filing")
+    # Prefer explicit EX-2/EX-4 filenames when present.
     for d in documents:
         name=d["name"];suffix=PurePosixPath(name).suffix.lower()
-        if suffix not in TEXT_EXT:continue
-        if EXHIBIT_NAME_RE.search(name):add(d,"priority_exhibit_filename")
-        if len(chosen)>=max_documents:break
+        if suffix in TEXT_EXT and EXHIBIT_NAME_RE.search(name):add(d,"priority_exhibit_filename")
+        if len(chosen)>=max_documents:return chosen[:max_documents]
+    # SEC index.json does not provide filing document type. When the caller lacks
+    # primary-document metadata, retain bounded textual accession documents for
+    # downstream content/context classification instead of returning an empty set.
+    if not primary_document:
+        for d in documents:
+            name=d["name"];suffix=PurePosixPath(name).suffix.lower()
+            if suffix not in TEXT_EXT or INDEX_NAME_RE.search(name):continue
+            add(d,"textual_accession_fallback")
+            if len(chosen)>=max_documents:break
     return chosen[:max_documents]
 
 def validate_selected_urls(selected:list[dict],base_url:str)->None:
