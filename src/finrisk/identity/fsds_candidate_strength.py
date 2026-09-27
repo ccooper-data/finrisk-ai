@@ -32,6 +32,10 @@ def candidate_strength(identity:pd.DataFrame,filing_names:pd.DataFrame,universe:
         rows.append({"cik":cik,"candidate_count":len(cand),"top_security_id":top_row["security_id"] if top_row is not None else None,
                      "top_security_name":top_row["security_name"] if top_row is not None else None,
                      "top_score":top,"second_score":second,"margin":margin,"top_score_tied":tied,"top_score_near_tied":near_tied,
+                     "top_tied_candidate_count":int(cand["discovery_score"].eq(top).sum()) if top is not None else 0,
+                     "top_tied_security_ids":cand.loc[cand["discovery_score"].eq(top),"security_id"].astype(str).tolist() if top is not None else [],
+                     "top_tied_security_names":cand.loc[cand["discovery_score"].eq(top),"security_name"].astype(str).tolist() if top is not None else [],
+                     "top_tied_isins":cand.loc[cand["discovery_score"].eq(top),"isin"].fillna("").astype(str).tolist() if top is not None else [],
                      "is_delisted":bool(top_row["is_delisted"]) if top_row is not None and pd.notna(top_row.get("is_delisted")) else None,
                      "isin":isin,"isin_present":isin is not None,
                      "high_margin":bool(top is not None and top>=.90 and margin is not None and margin>=.08)})
