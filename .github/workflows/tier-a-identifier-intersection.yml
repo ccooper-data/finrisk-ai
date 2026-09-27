@@ -1,0 +1,37 @@
+name: Intersect Tier-A SEC and candidate identifiers
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  intersect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: python -m compileall -q src
+      - run: pytest -q
+      - uses: actions/download-artifact@v4
+        with:
+          name: finrisk-tier-a-corroboration-36286992818
+          path: artifacts/source/corroboration
+          github-token: ${{ github.token }}
+          run-id: 36286992818
+      - uses: actions/download-artifact@v4
+        with:
+          name: finrisk-sec-identifier-retrieval-plan-36280211592
+          path: artifacts/source/targets
+          github-token: ${{ github.token }}
+          run-id: 36280211592
+      - run: finrisk intersect-tier-a-identifiers --corroboration artifacts/source/corroboration/tier_a_corroboration_candidates.parquet --targets artifacts/source/targets/identifier_targets.parquet --out-dir artifacts/identity/tier-a-identifier-intersection
+      - uses: actions/upload-artifact@v4
+        with:
+          name: finrisk-tier-a-identifier-intersection-${{ github.run_id }}
+          path: artifacts/identity/tier-a-identifier-intersection/
+          if-no-files-found: error
+          retention-days: 30
