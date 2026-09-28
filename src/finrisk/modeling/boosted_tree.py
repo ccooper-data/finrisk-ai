@@ -1,19 +1,24 @@
 from __future__ import annotations
 import json
 from pathlib import Path
+import joblib
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
 from sklearn.impute import SimpleImputer
 from finrisk.modeling.baseline import FEATURES, TemporalSplit, temporal_split
+from finrisk.modeling.probability_evidence import cohort_input_evidence, probability_evidence
 
 def _metrics(y,p):
     return {"rows":int(len(y)),"positives":int(np.sum(y)),"prevalence":float(np.mean(y)),
             "pr_auc":float(average_precision_score(y,p)),"roc_auc":float(roc_auc_score(y,p)),
             "brier":float(brier_score_loss(y,p))}
 
-def train_boosted_tree(frame:pd.DataFrame,split:TemporalSplit=TemporalSplit()):
+def train_boosted_tree(
+    frame: pd.DataFrame, split: TemporalSplit = TemporalSplit(), *,
+    calibration_out_dir: Path | None = None,
+):
     train,val,test=temporal_split(frame,split)
     features=[c for c in FEATURES if c in frame.columns]
     imputer=SimpleImputer(strategy="median",add_indicator=True)
@@ -29,18 +34,26 @@ def train_boosted_tree(frame:pd.DataFrame,split:TemporalSplit=TemporalSplit()):
         n_iter_no_change=25,random_state=42,
     )
     model.fit(x_train,y_train,sample_weight=weights)
-    results={}
+    results={};predictions={}
     for name,part in [("train",train),("validation",val),("test",test)]:
         p=model.predict_proba(imputer.transform(part[features]))[:,1]
+        predictions[name]=p
         results[name]=_metrics(part["distress_12m"].astype(int).to_numpy(),p)
+    results["test"]["calibration"] = probability_evidence(
+        val["distress_12m"].to_numpy(), predictions["validation"],
+        test["distress_12m"].to_numpy(), predictions["test"],
+        method="platt", artifact_dir=calibration_out_dir,
+    )
     config={"features":features,"train_end":split.train_end,"validation_end":split.validation_end,
             "positive_weight":positive_weight,"iterations":int(model.n_iter_)}
     return model,imputer,results,config
 
 def run_boosted_tree(cohort_path:Path,out_dir:Path):
+    provenance=cohort_input_evidence(cohort_path)
     frame=pd.read_parquet(cohort_path)
-    _,_,metrics,config=train_boosted_tree(frame)
+    model,imputer,metrics,config=train_boosted_tree(frame,calibration_out_dir=out_dir)
     out_dir.mkdir(parents=True,exist_ok=True)
-    evidence={"model":"hist_gradient_boosting","metrics":metrics,"config":config}
-    (out_dir/"boosted_tree_metrics.json").write_text(json.dumps(evidence,indent=2,sort_keys=True))
+    evidence={"model":"hist_gradient_boosting","metrics":metrics,"config":config,"input":provenance}
+    joblib.dump({"model":model,"imputer":imputer},out_dir/"boosted_tree_model.joblib")
+    (out_dir/"boosted_tree_metrics.json").write_text(json.dumps(evidence,indent=2,sort_keys=True,allow_nan=False))
     return evidence

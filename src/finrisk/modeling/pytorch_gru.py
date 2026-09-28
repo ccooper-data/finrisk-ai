@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np,pandas as pd
 from sklearn.metrics import average_precision_score,roc_auc_score,brier_score_loss
 from finrisk.modeling.sequences import build_sequence_arrays
+from finrisk.modeling.probability_evidence import cohort_input_evidence, probability_evidence
 
 def _torch():
     import torch
@@ -15,7 +16,7 @@ def _metrics(y,p):
             "pr_auc":float(average_precision_score(y,p)),"roc_auc":float(roc_auc_score(y,p)),
             "brier":float(brier_score_loss(y,p))}
 
-def train_pytorch_gru(frame,epochs=40,batch_size=2048):
+def train_pytorch_gru(frame,epochs=40,batch_size=2048,*,calibration_out_dir:Path|None=None):
     torch,nn=_torch();seed=42;random.seed(seed);np.random.seed(seed);torch.manual_seed(seed)
     seq,y,masks,lengths,meta=build_sequence_arrays(frame)
     class GRUModel(nn.Module):
@@ -46,15 +47,23 @@ def train_pytorch_gru(frame,epochs=40,batch_size=2048):
         if score>best+1e-5:best=score;state={k:v.detach().clone() for k,v in model.state_dict().items()};stale=0
         else:stale+=1
         if stale>=7:break
-    model.load_state_dict(state);metrics={}
+    model.load_state_dict(state);metrics={};predictions={}
     for name,mask in masks.items():
-        idx=np.where(mask)[0];metrics[name]=_metrics(y[idx].astype(int),predict(idx))
+        idx=np.where(mask)[0];predictions[name]=predict(idx)
+        metrics[name]=_metrics(y[idx].astype(int),predictions[name])
+    metrics["test"]["calibration"] = probability_evidence(
+        y[masks["validation"]], predictions["validation"],
+        y[masks["test"]], predictions["test"],
+        method="platt", artifact_dir=calibration_out_dir,
+    )
     config={**meta,"parameters":sum(p.numel() for p in model.parameters()),"epochs_ran":len(history),
             "best_validation_pr_auc":best,"seed":seed}
     return model,metrics,config,history
 
 def run_pytorch_gru(cohort_path:Path,out_dir:Path):
-    model,metrics,config,history=train_pytorch_gru(pd.read_parquet(cohort_path));out_dir.mkdir(parents=True,exist_ok=True)
-    evidence={"model":"pytorch_gru","framework":"pytorch","metrics":metrics,"config":config,"history":history}
-    (out_dir/"pytorch_gru_metrics.json").write_text(json.dumps(evidence,indent=2,sort_keys=True))
+    provenance=cohort_input_evidence(cohort_path)
+    model,metrics,config,history=train_pytorch_gru(pd.read_parquet(cohort_path),calibration_out_dir=out_dir)
+    out_dir.mkdir(parents=True,exist_ok=True)
+    evidence={"model":"pytorch_gru","framework":"pytorch","metrics":metrics,"config":config,"history":history,"input":provenance}
+    (out_dir/"pytorch_gru_metrics.json").write_text(json.dumps(evidence,indent=2,sort_keys=True,allow_nan=False))
     torch,_=_torch();torch.save(model.state_dict(),out_dir/"pytorch_gru_state.pt");return evidence
