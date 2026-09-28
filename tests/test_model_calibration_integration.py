@@ -17,7 +17,8 @@ def cohort():
     records = []
     for year in (2019, 2020, 2021, 2023):
         for cik in range(80):
-            label = int(cik % 8 == 0)
+            # Different prevalence makes validation/test argument swaps detectable.
+            label = int(cik % (5 if year == 2021 else 8) == 0)
             records.append({
                 "cik": str(cik), "adsh": f"{cik}-{year}", "filed": f"{year}-06-01",
                 "distress_12m": label, "current_ratio": 2-label+rng.normal(0, .4),
@@ -62,6 +63,7 @@ def test_real_training_runner_calls_validation_only_calibration(
     yv, pv, yt, pt = observed[0]
     assert len(yv) == metrics["validation"]["rows"] == 80
     assert len(yt) == metrics["test"]["rows"] == 80
+    assert yv.sum() == 16 and yt.sum() == 10
     # Derive expected order from each runner's actual input partition convention.
     if module_name.endswith("gru"):
         _, labels, masks, _, _ = module.build_sequence_arrays(cohort)

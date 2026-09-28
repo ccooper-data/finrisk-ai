@@ -41,6 +41,23 @@ def _reliability_bins(y, p):
     return result
 
 
+def _assert_fit_partition(calibrator, pv, yv, pt, yt) -> str:
+    """Check recorded fit inputs, not upstream row or temporal provenance.
+
+    The supplied arrays are the limit of this check. Distinct underlying rows
+    can have identical score/label arrays, so equality is a conservative block,
+    not proof that the upstream rows are the same.
+    """
+    observed = getattr(calibrator, "fit_fingerprint_", None)
+    if observed is None:
+        raise ValueError("Calibrator did not record its fit inputs; leakage cannot be verified")
+    if observed != array_fingerprint(pv, yv):
+        raise ValueError("Calibrator fit inputs do not match the validation partition")
+    if observed == array_fingerprint(pt, yt):
+        raise ValueError("Calibrator was fit on the test partition or the arrays are identical")
+    return observed
+
+
 def probability_evidence(
     y_validation, p_validation, y_test, p_test, method: str = "platt", *,
     artifact_dir: Path | None = None, _calibrator_factory=ProbabilityCalibrator,
