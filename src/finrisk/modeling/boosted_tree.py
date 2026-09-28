@@ -10,6 +10,7 @@ from sklearn.impute import SimpleImputer
 from finrisk.modeling.baseline import FEATURES, TemporalSplit, temporal_split
 from finrisk.modeling.probability_evidence import cohort_input_evidence, probability_evidence
 from finrisk.modeling import observation_identity
+from finrisk.modeling.run_environment import run_environment
 
 def _metrics(y,p):
     return {"rows":int(len(y)),"positives":int(np.sum(y)),"prevalence":float(np.mean(y)),
@@ -66,7 +67,7 @@ def run_boosted_tree(cohort_path:Path,out_dir:Path):
     frame=pd.read_parquet(cohort_path)
     model,imputer,metrics,config=train_boosted_tree(frame,calibration_out_dir=out_dir)
     out_dir.mkdir(parents=True,exist_ok=True)
-    evidence={"model":"hist_gradient_boosting","metrics":metrics,"config":config,"input":provenance}
+    evidence={"model":"hist_gradient_boosting","metrics":metrics,"config":config,"input":provenance,"environment":run_environment(sequence_preprocessing=False)}
     joblib.dump({"model":model,"imputer":imputer},out_dir/"boosted_tree_model.joblib")
     (out_dir/"boosted_tree_metrics.json").write_text(json.dumps(evidence,indent=2,sort_keys=True,allow_nan=False))
     return evidence
