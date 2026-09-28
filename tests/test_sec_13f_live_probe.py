@@ -43,3 +43,9 @@ def test_source_metadata_is_from_resolved_manifest_not_template():
     m=manifest([("2021Q4","txt"),("2020Q4","txt"),("2019Q4","pdf"),("2018Q4","pdf")])
     r=run_coverage_orchestration(cases(),aliases(),m,loader,parser)
     assert all(x["url"].startswith("https://sec/") for x in r["sources"].values())
+
+def test_live_script_has_no_hard_coded_13f_url_template():
+    from pathlib import Path
+    text=Path("scripts/run_five_case_13f_coverage.py").read_text()
+    assert "13flist{year}" not in text
+    assert "run_coverage_orchestration" in text
