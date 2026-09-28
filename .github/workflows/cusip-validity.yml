@@ -1,0 +1,31 @@
+name: Validate SEC CUSIP check digits
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: python -m compileall -q src scripts
+      - run: pytest -q
+      - uses: actions/download-artifact@v4
+        with:
+          name: finrisk-sec-tier-a-identifier-pilot-36361667661
+          path: artifacts/source/pilot
+          github-token: ${{ github.token }}
+          run-id: 36361667661
+      - run: python scripts/validate_sec_cusip_check_digits.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: finrisk-cusip-validity-${{ github.run_id }}
+          path: artifacts/identity/cusip-validity/
+          if-no-files-found: error
+          retention-days: 30
