@@ -1,0 +1,27 @@
+name: Probe positional 13f PDF fidelity
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]" pdfplumber
+      - run: python -m compileall -q src scripts
+      - run: pytest -q
+      - run: python scripts/probe_positional_13f_fidelity.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: finrisk-positional-13f-fidelity-${{ github.run_id }}
+          path: artifacts/identity/sec-13f-positional-fidelity/
+          if-no-files-found: error
+          retention-days: 30
