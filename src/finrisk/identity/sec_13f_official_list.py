@@ -65,6 +65,7 @@ def measure_name_coverage(hard_cases:pd.DataFrame,aliases:pd.DataFrame,official:
 TEXT_LINE_WIDTH=80
 TEXT_FIELDS={"cusip":(0,9),"marker":(9,10),"issuer_name":(10,38),
              "issuer_description":(40,56),"status":(67,70),"type_code":(79,80)}
+OPTION_DESCRIPTIONS={"CALL","PUT"}
 STATUS_ADDED="*A*"
 STATUS_DELETED="*D*"
 
@@ -87,8 +88,12 @@ def parse_official_13f_fixed_width(text:str)->pd.DataFrame:
         issuer=get("issuer_name").strip()
         if not normalize_entity_name(issuer): continue
         status=get("status").strip()
+        description=get("issuer_description").strip()
+        # CALL/PUT are derivative entries on the same issuer, excluded for the
+        # same reason the positional PDF parser excludes them.
+        if description.upper() in OPTION_DESCRIPTIONS: continue
         rows.append({"cusip":cusip,"issuer_name":issuer,
-                     "issuer_description":get("issuer_description").strip(),
+                     "issuer_description":description,
                      "status":status,"marker":get("marker").strip(),
                      "type_code":get("type_code").strip(),
                      "added_to_13f_list":status==STATUS_ADDED,
@@ -97,25 +102,45 @@ def parse_official_13f_fixed_width(text:str)->pd.DataFrame:
 
 
 def text_list_fidelity(text:str)->dict:
-    """Pre-filter counts, so a format change cannot masquerade as low coverage."""
+    """Pre-filter counts, so a format change cannot masquerade as low coverage.
+
+    Option rows are partitioned out before validity is judged, exactly as the
+    positional PDF path does. Whether a vintage carries CALL/PUT rows varies:
+    2024Q1 has none, 2026Q2 has 12,220 of 25,333. Their pseudo-CUSIPs are
+    derived by substituting 90/95 into the issue field without recomputing the
+    check digit, so they fail validation at chance rate (395 of 12,220 on
+    2026Q2, 3.23%) and must never be pooled with the securities.
+    """
     lines=(text or "").splitlines()
     widths={len(l) for l in lines if l.strip()}
     conforming=[l for l in lines if len(l)==TEXT_LINE_WIDTH]
     candidates=[l for l in conforming if l[0:9].strip()]
-    valid=[l for l in candidates if valid_cusip(l[0:9].strip().upper())]
+    a,b=TEXT_FIELDS["issuer_description"]
+    is_option=lambda l:l[a:b].strip().upper() in OPTION_DESCRIPTIONS
+    options=[l for l in candidates if is_option(l)]
+    securities=[l for l in candidates if not is_option(l)]
+    valid=[l for l in securities if valid_cusip(l[0:9].strip().upper())]
+    option_valid=[l for l in options if valid_cusip(l[0:9].strip().upper())]
     return {"lines":len(lines),"distinct_widths":sorted(widths),
             "conforming_lines":len(conforming),"candidate_rows":len(candidates),
-            "cusip_valid_rows":len(valid),
-            "cusip_valid_rate":(len(valid)/len(candidates)) if candidates else 0.0}
+            "option_rows":len(options),"option_cusip_valid_rows":len(option_valid),
+            "security_rows":len(securities),"cusip_valid_rows":len(valid),
+            "cusip_valid_rate":(len(valid)/len(securities)) if securities else 0.0}
 
 
 def assert_text_list_fidelity(report:dict,vintage:str,min_rows:int=1000)->None:
-    """Fail closed: the TXT lists are 100% check-digit valid when parsed correctly."""
+    """Fail closed: every non-option row must carry a check-digit-valid CUSIP.
+
+    The 100% expectation applies to securities only. Pooling option rows in
+    drops the rate to whatever fraction of the vintage happens to be options
+    (53.32% on 2026Q2) -- a property of the list's contents, not of parser
+    fidelity, and not a reason to lower the threshold.
+    """
     if report["distinct_widths"] not in ([TEXT_LINE_WIDTH],[]):
         raise ValueError(f"Unexpected TXT line widths for {vintage}: {report}")
-    if report["candidate_rows"]<min_rows:
-        raise ValueError(f"TXT row floor failed for {vintage}: {report}")
-    if report["cusip_valid_rows"]!=report["candidate_rows"]:
+    if report["security_rows"]<min_rows:
+        raise ValueError(f"TXT security row floor failed for {vintage}: {report}")
+    if report["cusip_valid_rows"]!=report["security_rows"]:
         raise ValueError(f"TXT CUSIP validity below 100% for {vintage}: {report}")
 
 
