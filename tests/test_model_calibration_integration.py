@@ -66,7 +66,7 @@ def test_real_training_runner_calls_validation_only_calibration(
     assert yv.sum() == 16 and yt.sum() == 10
     # Derive expected order from each runner's actual input partition convention.
     if module_name.endswith("gru"):
-        _, labels, masks, _, _ = module.build_sequence_arrays(cohort)
+        _, labels, masks, _, _, _ = module.build_sequence_arrays(cohort)
         expected_validation, expected_test = labels[masks["validation"]], labels[masks["test"]]
     else:
         _, validation, test = module.temporal_split(cohort)
