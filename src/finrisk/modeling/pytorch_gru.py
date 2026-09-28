@@ -5,6 +5,7 @@ import numpy as np,pandas as pd
 from sklearn.metrics import average_precision_score,roc_auc_score,brier_score_loss
 from finrisk.modeling.sequences import build_sequence_arrays
 from finrisk.modeling.probability_evidence import cohort_input_evidence, probability_evidence
+from finrisk.modeling import observation_identity
 
 def _torch():
     import torch
@@ -18,7 +19,7 @@ def _metrics(y,p):
 
 def train_pytorch_gru(frame,epochs=40,batch_size=2048,*,calibration_out_dir:Path|None=None):
     torch,nn=_torch();seed=42;random.seed(seed);np.random.seed(seed);torch.manual_seed(seed)
-    seq,y,masks,lengths,meta=build_sequence_arrays(frame)
+    seq,y,masks,lengths,meta,identifiers=build_sequence_arrays(frame)
     class GRUModel(nn.Module):
         def __init__(self,n_features):
             super().__init__();self.gru=nn.GRU(n_features,96,num_layers=2,batch_first=True,dropout=.2)
@@ -51,10 +52,26 @@ def train_pytorch_gru(frame,epochs=40,batch_size=2048,*,calibration_out_dir:Path
     for name,mask in masks.items():
         idx=np.where(mask)[0];predictions[name]=predict(idx)
         metrics[name]=_metrics(y[idx].astype(int),predictions[name])
+    # Identifiers come from the sequence builder, masked with the same boolean
+    # masks used to select predictions -- never copied from the source frame,
+    # whose row order the builder does not preserve.
+    def _ids(mask):
+        return {f:np.asarray(identifiers[f])[mask]
+                for f in observation_identity.IDENTIFIER_FIELDS}
     metrics["test"]["calibration"] = probability_evidence(
         y[masks["validation"]], predictions["validation"],
         y[masks["test"]], predictions["test"],
         method="platt", artifact_dir=calibration_out_dir,
+        validation_identifiers=_ids(masks["validation"]),
+        test_identifiers=_ids(masks["test"]),
+        validation_reuse={
+            "checkpoint_selection_uses_validation": True,
+            "checkpoint_selection_metric": "validation average_precision",
+            "calibration_uses_validation": True,
+            "independent_calibration_holdout": False,
+            "shared_partition": "checkpoint selection and calibration use the same validation rows",
+            "optimism_quantified": False,
+        },
     )
     config={**meta,"parameters":sum(p.numel() for p in model.parameters()),"epochs_ran":len(history),
             "best_validation_pr_auc":best,"seed":seed}

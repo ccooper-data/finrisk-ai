@@ -5,6 +5,7 @@ import numpy as np,pandas as pd
 from sklearn.metrics import average_precision_score,roc_auc_score,brier_score_loss
 from finrisk.modeling.sequences import build_sequence_arrays
 from finrisk.modeling.probability_evidence import cohort_input_evidence, probability_evidence
+from finrisk.modeling import observation_identity
 
 def _tf():
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL","2")
@@ -20,7 +21,7 @@ def train_tensorflow_gru(frame,epochs=40,batch_size=2048,*,calibration_out_dir:P
     tf=_tf();seed=42;random.seed(seed);np.random.seed(seed);tf.keras.utils.set_random_seed(seed)
     try:tf.config.experimental.enable_op_determinism()
     except Exception:pass
-    seq,y,masks,lengths,meta=build_sequence_arrays(frame)
+    seq,y,masks,lengths,meta,identifiers=build_sequence_arrays(frame)
     inp=tf.keras.Input(shape=(seq.shape[1],seq.shape[2]))
     x=tf.keras.layers.GRU(96,return_sequences=True,dropout=.2)(inp)
     x=tf.keras.layers.GRU(96,dropout=.2)(x)
@@ -39,10 +40,26 @@ def train_tensorflow_gru(frame,epochs=40,batch_size=2048,*,calibration_out_dir:P
         idx=np.where(mask)[0];p=model.predict(seq[idx],batch_size=8192,verbose=0).reshape(-1)
         predictions[name]=p
         metrics[name]=_metrics(y[idx].astype(int),p)
+    # Identifiers come from the sequence builder, masked with the same boolean
+    # masks used to select predictions -- never copied from the source frame,
+    # whose row order the builder does not preserve.
+    def _ids(mask):
+        return {f:np.asarray(identifiers[f])[mask]
+                for f in observation_identity.IDENTIFIER_FIELDS}
     metrics["test"]["calibration"] = probability_evidence(
         y[masks["validation"]], predictions["validation"],
         y[masks["test"]], predictions["test"],
         method="platt", artifact_dir=calibration_out_dir,
+        validation_identifiers=_ids(masks["validation"]),
+        test_identifiers=_ids(masks["test"]),
+        validation_reuse={
+            "checkpoint_selection_uses_validation": True,
+            "checkpoint_selection_metric": "tf.keras.metrics.AUC(curve=PR); val_pr_auc; threshold approximation",
+            "calibration_uses_validation": True,
+            "independent_calibration_holdout": False,
+            "shared_partition": "checkpoint selection and calibration use the same validation rows",
+            "optimism_quantified": False,
+        },
     )
     history=[{"epoch":i+1,"train_loss":float(hist.history["loss"][i]),"validation_pr_auc":float(hist.history["val_pr_auc"][i])}
              for i in range(len(hist.history["loss"]))]

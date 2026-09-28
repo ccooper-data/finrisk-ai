@@ -9,6 +9,7 @@ from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_s
 from sklearn.impute import SimpleImputer
 from finrisk.modeling.baseline import FEATURES, TemporalSplit, temporal_split
 from finrisk.modeling.probability_evidence import cohort_input_evidence, probability_evidence
+from finrisk.modeling import observation_identity
 
 def _metrics(y,p):
     return {"rows":int(len(y)),"positives":int(np.sum(y)),"prevalence":float(np.mean(y)),
@@ -39,10 +40,22 @@ def train_boosted_tree(
         p=model.predict_proba(imputer.transform(part[features]))[:,1]
         predictions[name]=p
         results[name]=_metrics(part["distress_12m"].astype(int).to_numpy(),p)
+    # This path predicts in partition row order, so partition rows are the
+    # aligned identifier source. The sequence models cannot do this; see
+    # modeling.sequences.
     results["test"]["calibration"] = probability_evidence(
         val["distress_12m"].to_numpy(), predictions["validation"],
         test["distress_12m"].to_numpy(), predictions["test"],
         method="platt", artifact_dir=calibration_out_dir,
+        validation_identifiers=observation_identity.identifiers_from_frame(val),
+        test_identifiers=observation_identity.identifiers_from_frame(test),
+        validation_reuse={
+            "checkpoint_selection_uses_validation": False,
+            "internal_early_stopping_partition": "carved from train by validation_fraction",
+            "calibration_uses_validation": True,
+            "independent_calibration_holdout": False,
+            "optimism_quantified": False,
+        },
     )
     config={"features":features,"train_end":split.train_end,"validation_end":split.validation_end,
             "positive_weight":positive_weight,"iterations":int(model.n_iter_)}

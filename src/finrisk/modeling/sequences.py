@@ -5,6 +5,7 @@ import pandas as pd
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
 from finrisk.modeling.baseline import TemporalSplit
+from finrisk.modeling import observation_identity
 
 SEQUENCE_FEATURES=[
     "assets","liabilities","equity","current_assets","current_liabilities","cash",
@@ -41,6 +42,11 @@ def build_sequence_arrays(frame:pd.DataFrame,split:TemporalSplit=TemporalSplit()
     scaler.fit(train_matrix)
     transformed=scaler.transform(imputer.transform(x[features])).astype("float32")
     x["_row"]=np.arange(len(x));seqs=[];labels=[];dates=[];ciks=[];lengths=[]
+    # Identifiers are captured here, at each sequence's prediction endpoint. This
+    # loop groups by issuer, sorts by filing date and skips rows with too little
+    # history, so the output order does not match the input frame -- copying
+    # identifiers from `frame` afterwards would silently misalign them.
+    adshs=[];events=[]
     for cik,g in x.groupby("cik",sort=False):
         g=g.sort_values("filed")
         idx=g["_row"].to_numpy()
@@ -50,14 +56,20 @@ def build_sequence_arrays(frame:pd.DataFrame,split:TemporalSplit=TemporalSplit()
             seq=np.zeros((config.lookback,len(features)),dtype="float32")
             seq[-len(hist):]=transformed[hist]
             seqs.append(seq);lengths.append(len(hist));labels.append(int(x.iloc[row_idx]["distress_12m"]))
-            dates.append(x.iloc[row_idx]["filed"]);ciks.append(str(cik))
+            endpoint=x.iloc[row_idx]
+            dates.append(endpoint["filed"]);ciks.append(str(cik))
+            adshs.append(endpoint["adsh"] if "adsh" in x.columns else None)
+            events.append(endpoint["next_distress_date"] if "next_distress_date" in x.columns else None)
     sequences=np.stack(seqs) if seqs else np.empty((0,config.lookback,len(features)),dtype="float32")
     labels=np.asarray(labels,dtype="float32");dates=pd.to_datetime(dates)
+    identifiers=observation_identity.identifiers_from_frame(pd.DataFrame({
+        "cik":ciks,"adsh":adshs,"filed":dates,"next_distress_date":events}))
     masks={"train":dates<=pd.Timestamp(split.train_end),
            "validation":(dates>pd.Timestamp(split.train_end))&(dates<=pd.Timestamp(split.validation_end)),
            "test":dates>pd.Timestamp(split.validation_end)}
     meta={"features":features,"lookback":config.lookback,"min_history":config.min_history,
           "rows":int(len(labels)),"companies":int(pd.Series(ciks).nunique()),
           "split_rows":{k:int(v.sum()) for k,v in masks.items()},
-          "split_positives":{k:int(labels[v].sum()) for k,v in masks.items()}}
-    return sequences,labels,masks,np.asarray(lengths),meta
+          "split_positives":{k:int(labels[v].sum()) for k,v in masks.items()},
+          "identifier_coverage":observation_identity.coverage(identifiers)}
+    return sequences,labels,masks,np.asarray(lengths),meta,identifiers
