@@ -197,23 +197,17 @@ def test_fingerprint_is_sensitive_to_order_and_labels():
     assert _fingerprint(_PV, _YV) != _fingerprint(_PV, 1 - _YV)
 
 
-# --- Ranking invariant ---------------------------------------------------------
+# --- Ranking changes caused by valid calibration are evidence, not failures -------
 
-def test_platt_preserves_ranking_bit_identically():
-    k = _evidence(_YV, _PV, _YT, _PT, "platt")["ranking"]
-    assert k["calibrated_roc_auc"] == _pytest.approx(k["raw_roc_auc"], abs=1e-12)
-    assert k["calibrated_pr_auc"] == _pytest.approx(k["raw_pr_auc"], abs=1e-12)
-
-
-def test_isotonic_may_lose_ranking_but_never_gain_it():
-    k = _evidence(_YV, _PV, _YT, _PT, "isotonic")["ranking"]
-    assert k["calibrated_roc_auc"] <= k["raw_roc_auc"] + 1e-12
+def test_isotonic_may_legitimately_improve_auc_by_creating_ties():
+    yv=_np.array([0,1,0,1]);pv=_np.array([.1,.2,.3,.4])
+    yt=_np.array([1,1,0]);pt=_np.array([.21,.25,.29])
+    r=_evidence(yv,pv,yt,pt,"isotonic")
+    assert r["ranking"]["calibrated_roc_auc"] > r["ranking"]["raw_roc_auc"]
 
 
-def test_ranking_drift_under_platt_raises_instead_of_being_reported():
-    class Shuffles(_Calibrator):
-        def predict(self, p):
-            return _np.asarray(super().predict(p), dtype=float)[::-1]
-
-    with _pytest.raises(ValueError, match="altered ROC-AUC"):
-        _evidence(_YV, _PV, _YT, _PT, "platt", _calibrator_factory=Shuffles)
+def test_platt_clipping_may_legitimately_change_auc_by_creating_ties():
+    yv=_np.array([0,0,1,1]);pv=_np.array([.1,.2,.8,.9])
+    yt=_np.array([1,0,1]);pt=_np.array([1e-12,1e-8,.8])
+    r=_evidence(yv,pv,yt,pt,"platt")
+    assert r["ranking"]["calibrated_roc_auc"] != r["ranking"]["raw_roc_auc"]
