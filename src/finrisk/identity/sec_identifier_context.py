@@ -5,8 +5,11 @@ SECURITY_TERMS=("common stock","common shares","ordinary shares","class a","clas
 DEBT_TERMS=("note","notes","debenture","bond","senior secured","senior unsecured","convertible note")
 PREFERRED_TERMS=("preferred stock","preferred shares","preference shares")
 
+def identifier_match(text:str,identifier:str):
+    return re.search(re.escape(identifier),text or "",re.I)
+
 def context_window(text:str,identifier:str,radius:int=220)->str:
-    s=text or "";m=re.search(re.escape(identifier),s,re.I)
+    s=text or "";m=identifier_match(s,identifier)
     if not m:return ""
     return s[max(0,m.start()-radius):min(len(s),m.end()+radius)]
 
@@ -23,8 +26,9 @@ def classify_identifier_context(window:str)->dict:
     return {"security_context":kind,"common_equity_context":kind=="common_equity"}
 
 def contextualize_identifiers(text:str,identifiers:list[str])->pd.DataFrame:
-    rows=[]
+    rows=[];s=text or ""
     for value in identifiers:
-        window=context_window(text,value);c=classify_identifier_context(window)
-        rows.append({"identifier":value,"context":window,**c})
+        m=identifier_match(s,value);window=context_window(s,value);c=classify_identifier_context(window)
+        rows.append({"identifier":value,"match_start":m.start() if m else None,"match_end":m.end() if m else None,
+                     "context":window,**c})
     return pd.DataFrame(rows)
