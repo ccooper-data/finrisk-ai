@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np,pandas as pd
 from sklearn.metrics import average_precision_score,roc_auc_score,brier_score_loss
 from finrisk.modeling.sequences import build_sequence_arrays
+from finrisk.modeling.baseline import TemporalSplit
 from finrisk.modeling.probability_evidence import cohort_input_evidence, probability_evidence
 from finrisk.modeling import observation_identity
 
@@ -17,9 +18,28 @@ def _metrics(y,p):
             "pr_auc":float(average_precision_score(y,p)),"roc_auc":float(roc_auc_score(y,p)),
             "brier":float(brier_score_loss(y,p))}
 
-def train_pytorch_gru(frame,epochs=40,batch_size=2048,*,calibration_out_dir:Path|None=None):
-    torch,nn=_torch();seed=42;random.seed(seed);np.random.seed(seed);torch.manual_seed(seed)
+def train_pytorch_gru(
+    frame, epochs=40, batch_size=2048, *, calibration_out_dir: Path | None = None,
+    seed: int = 42, validation_only: bool = False,
+):
+    if isinstance(seed, bool) or not isinstance(seed, (int, np.integer)) or not 0 <= seed < 2**32:
+        raise ValueError("seed must be an integer in [0, 2**32)")
+    if type(validation_only) is not bool:
+        raise ValueError("validation_only must be a boolean")
+    for name, value in (("epochs", epochs), ("batch_size", batch_size)):
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 1:
+            raise ValueError(f"{name} must be a positive integer")
+    seed = int(seed)
+    if validation_only:
+        # Filter before sequence construction: held-out labels/features never reach it.
+        dates = pd.to_datetime(frame["filed"], errors="raise")
+        if dates.isna().any():
+            raise ValueError("filing dates must be present")
+        frame = frame.loc[dates <= pd.Timestamp(TemporalSplit().validation_end)].copy()
+    torch,nn=_torch();random.seed(seed);np.random.seed(seed);torch.manual_seed(seed)
     seq,y,masks,lengths,meta,identifiers=build_sequence_arrays(frame)
+    if validation_only and np.any(masks["test"]):
+        raise ValueError("validation-only sequence construction returned test rows")
     class GRUModel(nn.Module):
         def __init__(self,n_features):
             super().__init__();self.gru=nn.GRU(n_features,96,num_layers=2,batch_first=True,dropout=.2)
@@ -49,7 +69,9 @@ def train_pytorch_gru(frame,epochs=40,batch_size=2048,*,calibration_out_dir:Path
         else:stale+=1
         if stale>=7:break
     model.load_state_dict(state);metrics={};predictions={}
-    for name,mask in masks.items():
+    evaluation_masks = ({name: masks[name] for name in ("train", "validation")}
+                        if validation_only else masks)
+    for name,mask in evaluation_masks.items():
         idx=np.where(mask)[0];predictions[name]=predict(idx)
         metrics[name]=_metrics(y[idx].astype(int),predictions[name])
     # Identifiers come from the sequence builder, masked with the same boolean
@@ -58,6 +80,21 @@ def train_pytorch_gru(frame,epochs=40,batch_size=2048,*,calibration_out_dir:Path
     def _ids(mask):
         return {f:np.asarray(identifiers[f])[mask]
                 for f in observation_identity.IDENTIFIER_FIELDS}
+    if validation_only:
+        if calibration_out_dir is not None:
+            destination = Path(calibration_out_dir)
+            destination.mkdir(parents=True, exist_ok=True)
+            arrays = {"y_validation": y[masks["validation"]],
+                      "p_validation": predictions["validation"]}
+            arrays.update({f"validation_{field}": np.asarray(values, dtype=str)
+                           for field, values in _ids(masks["validation"]).items()})
+            np.savez_compressed(destination / "validation_predictions.npz", **arrays)
+        config = {**meta, "parameters": sum(p.numel() for p in model.parameters()),
+                  "epochs_ran": len(history), "best_validation_pr_auc": best, "seed": seed,
+                  "evaluation_scope": "validation_only", "test_evaluated": False,
+                  "calibration_fitted": False,
+                  "validation_reused_for_checkpoint_selection": True}
+        return model, metrics, config, history
     metrics["test"]["calibration"] = probability_evidence(
         y[masks["validation"]], predictions["validation"],
         y[masks["test"]], predictions["test"],
