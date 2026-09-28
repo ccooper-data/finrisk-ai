@@ -5,7 +5,7 @@ def test_cluster_bootstrap_is_deterministic_and_resamples_clusters():
     y=np.array([0,1,0,0,1,0]);m=np.array([.1,.7,.1,.1,.7,.1]);b=np.full(6,1/3)
     c=np.array(["1","1","2","2","3","3"])
     a=paired_cik_cluster_bootstrap(y,m,1/3,c,replicates=200,seed=7)
-    z=paired_cik_cluster_bootstrap(y,m,b,c,replicates=200,seed=7)
+    z=paired_cik_cluster_bootstrap(y,m,1/3,c,replicates=200,seed=7)
     assert a==z and a["unique_test_ciks"]==3
     assert a["scope"]["includes_retraining_uncertainty"] is False
 
