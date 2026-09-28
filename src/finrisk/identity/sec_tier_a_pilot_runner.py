@@ -37,8 +37,10 @@ def run_tier_a_pilot(targets:pd.DataFrame,plan:pd.DataFrame,user_agent:str,out_d
                     ctx=contextualize_identifiers(text,values)
                     for _,x in ctx.iterrows():
                         rows.append({"cik":p["cik"],"accession":p["accession"],"filing_date":p["filing_date"],
-                                     "candidate_security_id":p["candidate_security_id"],"document_url":d["url"],
+                                     "candidate_security_id":p["candidate_security_id"],"filing_form":p.get("form"),"document_url":d["url"],
+                                     "document_name":d.get("name"),"document_selection_reason":d.get("selection_reason"),
                                      "document_sha256":ev["sha256"],"identifier_type":kind,"identifier":x["identifier"],
+                                     "identifier_context":x["context"],"identifier_match_start":x["match_start"],"identifier_match_end":x["match_end"],
                                      "security_context":x["security_context"],"common_equity_context":x["common_equity_context"],
                                      "review_status":"unreviewed"})
                 time.sleep(.11)
