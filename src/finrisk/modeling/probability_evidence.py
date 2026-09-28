@@ -11,7 +11,7 @@ import numpy as np
 import sklearn
 from sklearn.metrics import average_precision_score, brier_score_loss, log_loss, roc_auc_score
 
-from finrisk.modeling.calibration import ProbabilityCalibrator
+from finrisk.modeling.calibration import ProbabilityCalibrator, array_fingerprint
 
 
 def _inputs(labels, probabilities, partition: str):
@@ -41,9 +41,26 @@ def _reliability_bins(y, p):
     return result
 
 
+def _assert_fit_partition(calibrator, pv, yv, pt, yt) -> str:
+    """Check recorded fit inputs, not upstream row or temporal provenance.
+
+    The supplied arrays are the limit of this check. Distinct underlying rows
+    can have identical score/label arrays, so equality is a conservative block,
+    not proof that the upstream rows are the same.
+    """
+    observed = getattr(calibrator, "fit_fingerprint_", None)
+    if observed is None:
+        raise ValueError("Calibrator did not record its fit inputs; leakage cannot be verified")
+    if observed != array_fingerprint(pv, yv):
+        raise ValueError("Calibrator fit inputs do not match the validation partition")
+    if observed == array_fingerprint(pt, yt):
+        raise ValueError("Calibrator was fit on the test partition or the arrays are identical")
+    return observed
+
+
 def probability_evidence(
     y_validation, p_validation, y_test, p_test, method: str = "platt", *,
-    artifact_dir: Path | None = None,
+    artifact_dir: Path | None = None, _calibrator_factory=ProbabilityCalibrator,
 ) -> dict:
     """Fit on validation only; evaluate the preselected method on test.
 
@@ -54,7 +71,8 @@ def probability_evidence(
     yt, pt = _inputs(y_test, p_test, "test")
     if np.unique(yv).size != 2:
         raise ValueError("validation: calibration requires both outcome classes")
-    calibrator = ProbabilityCalibrator(method).fit(pv, yv)
+    calibrator = _calibrator_factory(method).fit(pv, yv)
+    fit_fingerprint = _assert_fit_partition(calibrator, pv, yv, pt, yt)
     _, calibrated = _inputs(yt, calibrator.predict(pt), "calibrated test")
     baseline_probability = float(yv.mean())
     constant = np.full(len(yt), baseline_probability, dtype=float)
@@ -66,6 +84,7 @@ def probability_evidence(
         "calibration_method": method,
         "method_selection": "fixed_before_test_evaluation",
         "fit_partition": "validation",
+        "fit_fingerprint": fit_fingerprint,
         "evaluation_partition": "test",
         "validation_rows": int(len(yv)),
         "validation_positives": int(yv.sum()),

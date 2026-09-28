@@ -111,3 +111,103 @@ def test_input_fingerprint_is_exact_and_not_lineage_approval(tmp_path, monkeypat
     assert report["upstream_source_lineage"] == "not_verified_by_model_runner"
     path.write_bytes(b"changed")
     assert cohort_input_evidence(path)["cohort_sha256"] != report["cohort_sha256"]
+
+
+# --- Leakage verified behaviourally, not by a label ----------------------------
+#
+# "fit_partition": "validation" is a string literal: it would still read
+# "validation" if the calibrator were fit on test. These check the property and
+# the wiring, and a deliberately leaking calibrator must be rejected.
+
+import numpy as _np
+import pytest as _pytest
+from finrisk.modeling.calibration import ProbabilityCalibrator as _Calibrator
+from finrisk.modeling.calibration import array_fingerprint as _fingerprint
+from finrisk.modeling.probability_evidence import probability_evidence as _evidence
+
+
+def _leak_split(n, positives, seed, shift=1.25):
+    rng = _np.random.default_rng(seed)
+    y = _np.zeros(n, dtype=int)
+    y[rng.choice(n, positives, replace=False)] = 1
+    return y, 1 / (1 + _np.exp(-(rng.normal(0, 1, n) + y * shift)))
+
+
+_YV, _PV = _leak_split(4000, 120, 11)
+_YT, _PT = _leak_split(6000, 180, 12)
+
+
+def test_test_labels_cannot_change_the_calibrator():
+    """Same scores, different test labels -> identical fit. The property, not a label."""
+    a = _evidence(_YV, _PV, _YT, _PT)
+    b = _evidence(_YV, _PV, 1 - _YT, _PT)
+    assert a["fit_fingerprint"] == b["fit_fingerprint"]
+    assert a["probability_quality"]["calibrated_brier"] != b["probability_quality"]["calibrated_brier"]
+
+
+def test_calibrator_receives_only_validation_arrays():
+    seen = {}
+
+    class Spy(_Calibrator):
+        def fit(self, p, y):
+            seen["fingerprint"] = _fingerprint(p, y)
+            return super().fit(p, y)
+
+    _evidence(_YV, _PV, _YT, _PT, _calibrator_factory=Spy)
+    assert seen["fingerprint"] == _fingerprint(_PV, _YV)
+    assert seen["fingerprint"] != _fingerprint(_PT, _YT)
+
+
+def test_a_calibrator_fit_on_test_is_rejected():
+    class FitsOnTest(_Calibrator):
+        def fit(self, p, y):
+            return super().fit(_PT, _YT)
+
+    with _pytest.raises(ValueError, match="do not match the validation partition"):
+        _evidence(_YV, _PV, _YT, _PT, _calibrator_factory=FitsOnTest)
+
+
+def test_a_calibrator_fit_on_validation_plus_test_is_rejected():
+    class FitsOnBoth(_Calibrator):
+        def fit(self, p, y):
+            return super().fit(_np.r_[p, _PT], _np.r_[y, _YT])
+
+    with _pytest.raises(ValueError, match="do not match the validation partition"):
+        _evidence(_YV, _PV, _YT, _PT, _calibrator_factory=FitsOnBoth)
+
+
+def test_a_calibrator_that_hides_its_fit_inputs_is_rejected():
+    class Silent(_Calibrator):
+        def fit(self, p, y):
+            super().fit(p, y)
+            self.fit_fingerprint_ = None
+            return self
+
+    with _pytest.raises(ValueError, match="did not record its fit inputs"):
+        _evidence(_YV, _PV, _YT, _PT, _calibrator_factory=Silent)
+
+
+def test_identical_validation_and_test_partitions_are_rejected():
+    with _pytest.raises(ValueError, match="fit on the test partition"):
+        _evidence(_YT, _PT, _YT, _PT)
+
+
+def test_fingerprint_is_sensitive_to_order_and_labels():
+    assert _fingerprint(_PV, _YV) != _fingerprint(_PV[::-1], _YV[::-1])
+    assert _fingerprint(_PV, _YV) != _fingerprint(_PV, 1 - _YV)
+
+
+# --- Ranking changes caused by valid calibration are evidence, not failures -------
+
+def test_isotonic_may_legitimately_improve_auc_by_creating_ties():
+    yv=_np.array([0,1,0,1]);pv=_np.array([.1,.2,.3,.4])
+    yt=_np.array([1,1,0]);pt=_np.array([.21,.25,.29])
+    r=_evidence(yv,pv,yt,pt,"isotonic")
+    assert r["ranking"]["calibrated_roc_auc"] > r["ranking"]["raw_roc_auc"]
+
+
+def test_platt_clipping_may_legitimately_change_auc_by_creating_ties():
+    yv=_np.array([0,0,1,1]);pv=_np.array([.1,.2,.8,.9])
+    yt=_np.array([1,0,1]);pt=_np.array([1e-12,1e-8,.8])
+    r=_evidence(yv,pv,yt,pt,"platt")
+    assert r["ranking"]["calibrated_roc_auc"] != r["ranking"]["raw_roc_auc"]
