@@ -11,3 +11,12 @@ def test_context_window_is_local_to_identifier():
     t="x"*500+"CUSIP 123456789 common stock"+"y"*500
     w=context_window(t,"123456789",100)
     assert len(w)<250 and "common stock" in w
+
+
+def test_contextualization_preserves_match_offsets():
+    from finrisk.identity.sec_identifier_context import contextualize_identifiers
+    text="prefix CUSIP 123456789 common stock suffix"
+    d=contextualize_identifiers(text,["123456789"])
+    start=text.index("123456789")
+    assert d.loc[0,"match_start"]==start
+    assert d.loc[0,"match_end"]==start+9
