@@ -2,7 +2,7 @@ from __future__ import annotations
 import hashlib,io,json,os,time
 from pathlib import Path
 import httpx,pandas as pd,pdfplumber
-from finrisk.identity.sec_13f_positional import OFFICIAL_LIST_BOUNDS,COPYRIGHT_COVER_PAGES,parse_page_words,page_fidelity_report,assert_equity_cusip_fidelity
+from finrisk.identity.sec_13f_positional import OFFICIAL_LIST_BOUNDS,COPYRIGHT_COVER_PAGES,parse_page_words,page_fidelity_report,assert_equity_cusip_fidelity\nfrom finrisk.identity.sec_13f_official_list import parse_official_13f_fixed_width,text_list_fidelity,assert_text_list_fidelity\nfrom finrisk.identity.sec_13f_source_index import preflight,assert_preflight,resolve
 from finrisk.identity.sec_13f_coverage_probe import select_five_cases,observation_quarters,list_name_key
 
 CONTROLS=("APPLE INC","MICROSOFT CORP")
@@ -44,7 +44,7 @@ with httpx.Client() as client:
     keys=set(frame["issuer_name"].map(list_name_key))
     control_hits={c:list_name_key(c) in keys for c in CONTROLS}
     if not all(control_hits.values()):raise ValueError(f"Positive control failure {vintage}: {control_hits}")
-    sources[vintage]={"url":url,"sha256":hashlib.sha256(content).hexdigest(),"bytes":len(content),"fidelity":tot,"controls":control_hits}
+    sources[vintage]={"url":url,"format":source.fmt,"sha256":hashlib.sha256(content).hexdigest(),"bytes":len(content),"fidelity":tot,"controls":control_hits}
     for _,case in cases.iterrows():
       if (year,q) not in observation_quarters(case["last_filing"]):continue
       cik=str(case["cik"])
