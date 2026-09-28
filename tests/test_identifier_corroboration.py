@@ -19,7 +19,7 @@ def test_isin_requires_real_country_code_and_luhn():
 
 def test_cusip_checksum():
     assert valid_cusip("037833100")
-    assert not valid_cusip("C86277404")
+    assert valid_cusip("C86277404")  # checksum-valid by chance; unlabeled extraction must still reject it
     assert not valid_cusip("102937000")
 
 def test_us_isin_can_be_corroborated_by_valid_embedded_cusip():
