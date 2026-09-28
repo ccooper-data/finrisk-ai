@@ -127,8 +127,15 @@ def list_membership_events(frame:pd.DataFrame,vintage:str)->pd.DataFrame:
     corroboration of SEC `*D*` semantics.
     """
     changed=frame[frame["added_to_13f_list"]|frame["deleted_from_13f_list"]].copy()
-    changed["event"]=changed["deleted_from_13f_list"].map({True:"deleted_from_13f_list",False:"added_to_13f_list"})
-    changed["deleted_from_13f_list_quarter"]=changed["deleted_from_13f_list"].map(lambda x:vintage if x else None)
-    changed["added_to_13f_list_quarter"]=changed["added_to_13f_list"].map(lambda x:vintage if x else None)
+    deleted=changed["deleted_from_13f_list"].astype(bool).tolist()
+    added=changed["added_to_13f_list"].astype(bool).tolist()
+    # Build with object dtype so the absent quarter stays None; .map() coerces it
+    # to NaN on some pandas versions, which makes the two events hard to assert on.
+    changed["event"]=pd.Series(["deleted_from_13f_list" if d else "added_to_13f_list" for d in deleted],
+                               index=changed.index,dtype=object)
+    changed["deleted_from_13f_list_quarter"]=pd.Series([vintage if d else None for d in deleted],
+                                                      index=changed.index,dtype=object)
+    changed["added_to_13f_list_quarter"]=pd.Series([vintage if a else None for a in added],
+                                                  index=changed.index,dtype=object)
     return changed[["cusip","issuer_name","issuer_description","event",
                     "added_to_13f_list_quarter","deleted_from_13f_list_quarter"]].reset_index(drop=True)
