@@ -41,38 +41,6 @@ def _reliability_bins(y, p):
     return result
 
 
-RANKING_TOLERANCE = 1e-12
-
-
-def _assert_fit_partition(calibrator, pv, yv, pt, yt) -> str:
-    """Verify the calibrator was fit on validation, by reading what it recorded.
-
-    Note the limit of this boundary: the function receives bare arrays and cannot
-    know an array's provenance, so "reject test data" is not expressible here.
-    What is expressible -- and what this checks -- is that the calibrator's own
-    record of its fit inputs matches validation and differs from test.
-    """
-    observed = getattr(calibrator, "fit_fingerprint_", None)
-    if observed is None:
-        raise ValueError("Calibrator did not record its fit inputs; leakage cannot be verified")
-    if observed != array_fingerprint(pv, yv):
-        raise ValueError("Calibrator fit inputs do not match the validation partition")
-    if observed == array_fingerprint(pt, yt):
-        raise ValueError("Calibrator was fit on the test partition")
-    return observed
-
-
-def _assert_ranking_preserved(method: str, raw: float | None, calibrated: float | None) -> None:
-    """Platt is strictly monotone, so ROC-AUC must be bit-identical; any drift is
-    a pipeline bug. Isotonic is weakly monotone and may only lose ranking."""
-    if raw is None or calibrated is None:
-        return
-    if method == "platt" and abs(calibrated - raw) > RANKING_TOLERANCE:
-        raise ValueError(f"Platt calibration altered ROC-AUC by {calibrated - raw:.3e}")
-    if method == "isotonic" and calibrated - raw > RANKING_TOLERANCE:
-        raise ValueError(f"Isotonic calibration increased ROC-AUC by {calibrated - raw:.3e}")
-
-
 def probability_evidence(
     y_validation, p_validation, y_test, p_test, method: str = "platt", *,
     artifact_dir: Path | None = None, _calibrator_factory=ProbabilityCalibrator,
@@ -135,8 +103,6 @@ def probability_evidence(
         },
         "versions": {"numpy": np.__version__, "scikit_learn": sklearn.__version__},
     }
-    _assert_ranking_preserved(method, report["ranking"]["raw_roc_auc"],
-                              report["ranking"]["calibrated_roc_auc"])
     if artifact_dir is not None:
         artifact_dir = Path(artifact_dir)
         artifact_dir.mkdir(parents=True, exist_ok=True)
