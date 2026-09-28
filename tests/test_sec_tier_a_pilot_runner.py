@@ -17,3 +17,6 @@ def test_runner_does_not_abort_entire_pilot_on_oversized_document(tmp_path,monke
     monkeypatch.setattr(m,"fetch_document",lambda url,*a,**k: (_ for _ in ()).throw(ValueError("SEC document exceeds 8000000 bytes")) if url.endswith("big.htm") else ("CUSIP 037833100 common stock",{"sha256":"x"}))
     r=m.run_tier_a_pilot(targets,plan,"ua",tmp_path)
     assert r["documents_skipped_oversize"]==1 and r["documents_fetched"]==1
+    evidence=pd.read_parquet(tmp_path/"tier_a_identifier_evidence.parquet")
+    assert "identifier_context" in evidence.columns
+    assert "CUSIP 037833100 common stock" in evidence.loc[0,"identifier_context"]
