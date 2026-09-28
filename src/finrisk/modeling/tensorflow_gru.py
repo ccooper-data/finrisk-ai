@@ -54,7 +54,7 @@ def train_tensorflow_gru(frame,epochs=40,batch_size=2048,*,calibration_out_dir:P
         test_identifiers=_ids(masks["test"]),
         validation_reuse={
             "checkpoint_selection_uses_validation": True,
-            "checkpoint_selection_metric": "validation average_precision",
+            "checkpoint_selection_metric": "tf.keras.metrics.AUC(curve=PR); val_pr_auc; threshold approximation",
             "calibration_uses_validation": True,
             "independent_calibration_holdout": False,
             "shared_partition": "checkpoint selection and calibration use the same validation rows",

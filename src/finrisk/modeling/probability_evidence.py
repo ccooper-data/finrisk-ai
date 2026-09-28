@@ -4,12 +4,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import warnings
 from pathlib import Path
 
 import joblib
 import numpy as np
 import sklearn
 from sklearn.linear_model import LogisticRegression
+from sklearn.exceptions import ConvergenceWarning
+from scipy.special import expit
 from sklearn.metrics import average_precision_score, brier_score_loss, log_loss, roc_auc_score
 
 from finrisk.modeling.calibration import ProbabilityCalibrator, array_fingerprint
@@ -47,6 +50,7 @@ def _reliability_bins(y, p):
 LOGIT_CLIP = (1e-12, 1.0 - 1e-12)
 JOINT_FIT_TOL = 1e-10
 MAX_JOINT_ITERATIONS = 20000
+MEAN_SCORE_TOLERANCE = 1e-7
 UNAVAILABLE = "unavailable"
 
 
@@ -70,7 +74,7 @@ def _quantile_reliability_bins(y, p, bins: int = 10) -> dict:
     edges = np.unique(np.quantile(p, np.linspace(0.0, 1.0, bins + 1)))
     if edges.size < 2:
         return {"strategy": "quantile", "status": "degenerate_constant_predictions",
-                "requested_bins": bins, "realized_bins": 1,
+                "requested_bins": bins, "realized_bins": 1, "interval_count": 1,
                 "boundaries": [float(edges[0])] if edges.size else [],
                 "bins": [{"lower": float(edges[0]) if edges.size else None,
                           "upper": float(edges[0]) if edges.size else None,
@@ -91,7 +95,8 @@ def _quantile_reliability_bins(y, p, bins: int = 10) -> dict:
             "event_rate": float(y[mask].mean()) if count else None,
         })
     return {"strategy": "quantile", "status": "ok", "requested_bins": bins,
-            "realized_bins": len(rows), "boundaries": [float(e) for e in edges],
+            "realized_bins": sum(row["rows"] > 0 for row in rows),
+            "interval_count": len(rows), "boundaries": [float(e) for e in edges],
             "bins": rows}
 
 
@@ -122,50 +127,89 @@ def _calibration_in_the_large(y, p) -> float | None:
 
 
 def calibration_diagnostics(y_test, p_calibrated) -> dict:
-    """Retrospective diagnostics computed FROM test labels.
+    """Retrospective test-label diagnostics; never apply these fits to predictions.
 
-    Explicitly not used to fit, select or adjust anything that produces
-    predictions. Reported so residual miscalibration is visible, not corrected.
+    Finite logistic MLEs require overlap, not just a small optimizer gradient.
+    The separation check below is specific to one logit covariate + intercept.
+    Joint-fit failure does not discard independently valid AP/lift or CITL.
     """
-    y = np.asarray(y_test, dtype=int)
-    p = np.asarray(p_calibrated, dtype=float)
     report = {
         "uses_test_labels": True,
         "used_for_prediction": False,
         "used_for_model_selection": False,
         "estimator": "unpenalised binomial logistic MLE on logit(p); lbfgs",
         "solver_tolerance": JOINT_FIT_TOL,
+        "mean_score_tolerance": MEAN_SCORE_TOLERANCE,
         "logit_clip": [float(LOGIT_CLIP[0]), float(LOGIT_CLIP[1])],
-        "prevalence": float(y.mean()) if len(y) else None,
     }
-    if len(np.unique(y)) != 2:
+    try:
+        y, p = _inputs(y_test, p_calibrated, "diagnostics")
+    except (TypeError, ValueError):
+        report["status"] = "unavailable_invalid_inputs"
+        return report
+    report["prevalence"] = float(y.mean())
+    if np.unique(y).size != 2:
         report["status"] = "unavailable_single_class_test"
         return report
-    if np.unique(p).size < 2:
-        report["status"] = "unavailable_constant_predictions"
-        return report
     report["average_precision"] = float(average_precision_score(y, p))
-    report["average_precision_over_prevalence"] = (
-        report["average_precision"] / report["prevalence"] if report["prevalence"] else None)
-    try:
-        # Default tol=1e-4 stops well short on this geometry: the intercept is
-        # evaluated ~5 logits outside the data, so a loose fit moves it by
-        # thousandths. Tightened so the reported coefficients are reproducible.
-        fit = LogisticRegression(penalty=None, solver="lbfgs", max_iter=MAX_JOINT_ITERATIONS,
-                                 tol=JOINT_FIT_TOL).fit(_logit(p).reshape(-1, 1), y)
-        converged = bool(np.all(np.asarray(fit.n_iter_) < MAX_JOINT_ITERATIONS))
-        report["joint_recalibration"] = {
-            "intercept": float(fit.intercept_[0]), "slope": float(fit.coef_[0][0]),
-            "converged": converged, "iterations": int(np.max(fit.n_iter_)),
-            "note": "intercept and slope act jointly; the intercept is not a base-rate term",
-        }
-    except Exception as exc:  # pragma: no cover - solver failure path
-        report["joint_recalibration"] = {"status": f"unavailable_fit_failed: {type(exc).__name__}"}
+    report["average_precision_over_prevalence"] = report["average_precision"] / report["prevalence"]
     offset = _calibration_in_the_large(y, p)
     report["calibration_in_the_large"] = (
-        {"intercept_only_offset": offset, "slope_fixed_at": 1.0}
+        {"status": "ok", "intercept_only_offset": offset, "slope_fixed_at": 1.0}
         if offset is not None else {"status": "unavailable_no_bracketed_root"})
-    report["status"] = "ok"
+    if np.unique(p).size < 2:
+        # Retain the existing status/absence of a joint fit, but preserve the
+        # now-computed AP, lift and identifiable intercept-only offset.
+        report["status"] = "unavailable_constant_predictions"
+        return report
+
+    z = _logit(p)
+    joint = None
+    if np.unique(z).size < 2:
+        joint = {"status": "unavailable_constant_logit_after_clipping"}
+    else:
+        z0, z1 = z[y == 0], z[y == 1]
+        if z0.max() < z1.min() or z1.max() < z0.min():
+            joint = {"status": "unavailable_complete_separation"}
+        elif z0.max() == z1.min() or z1.max() == z0.min():
+            joint = {"status": "unavailable_quasi_separation"}
+    if joint is None:
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always", ConvergenceWarning)
+                fit = LogisticRegression(
+                    penalty=None, solver="lbfgs", max_iter=MAX_JOINT_ITERATIONS,
+                    tol=JOINT_FIT_TOL,
+                ).fit(z.reshape(-1, 1), y)
+            iterations = int(np.max(fit.n_iter_))
+            warned = any(issubclass(w.category, ConvergenceWarning) for w in caught)
+            coefficients = np.array([fit.intercept_[0], fit.coef_[0][0]], dtype=float)
+            if warned or iterations >= MAX_JOINT_ITERATIONS:
+                joint = {"status": "unavailable_nonconverged", "converged": False,
+                         "iterations": iterations, "convergence_warning": warned}
+            elif not np.isfinite(coefficients).all():
+                joint = {"status": "unavailable_nonfinite_coefficients", "converged": False}
+            else:
+                residual = y - expit(coefficients[0] + coefficients[1] * z)
+                score = float(max(abs(residual.mean()), abs(np.mean(residual * z))))
+                if not np.isfinite(score) or score > MEAN_SCORE_TOLERANCE:
+                    joint = {"status": "unavailable_score_equations", "converged": False,
+                             "iterations": iterations}
+                else:
+                    joint = {
+                        "status": "ok", "intercept": float(coefficients[0]),
+                        "slope": float(coefficients[1]), "converged": True,
+                        "iterations": iterations, "max_abs_mean_score": score,
+                        "note": "intercept and slope act jointly; the intercept is not a base-rate term",
+                    }
+        except Exception as exc:
+            # A retrospective diagnostic is allowed to be unavailable; a model
+            # run must not fail or publish invalid coefficients because of it.
+            joint = {"status": "unavailable_fit_failed", "error_type": type(exc).__name__,
+                     "converged": False}
+    report["joint_recalibration"] = joint
+    report["status"] = ("ok" if joint["status"] == "ok"
+                        and report["calibration_in_the_large"]["status"] == "ok" else "partial")
     return report
 
 
@@ -213,6 +257,7 @@ def probability_evidence(
     prevalence = float(yt.mean())
     oracle_constant = np.full(len(yt), prevalence, dtype=float)
     both_classes = np.unique(yt).size == 2
+    bootstrap_readiness = observation_identity.cluster_bootstrap_readiness(test_identifiers)
     report = {
         "schema_version": 2,
         "calibration_method": method,
@@ -262,8 +307,8 @@ def probability_evidence(
                            if validation_identifiers is not None else UNAVAILABLE),
             "test": (observation_identity.coverage(test_identifiers)
                      if test_identifiers is not None else UNAVAILABLE),
-            "supports_cluster_bootstrap": bool(
-                validation_identifiers is not None and test_identifiers is not None),
+            "supports_cluster_bootstrap": bootstrap_readiness["supports_cluster_bootstrap"],
+            "cluster_bootstrap_readiness": bootstrap_readiness,
         },
         "validation_reuse": validation_reuse if validation_reuse is not None else {
             "checkpoint_selection_uses_validation": UNAVAILABLE,
