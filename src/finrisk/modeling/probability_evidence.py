@@ -11,7 +11,7 @@ import numpy as np
 import sklearn
 from sklearn.metrics import average_precision_score, brier_score_loss, log_loss, roc_auc_score
 
-from finrisk.modeling.calibration import ProbabilityCalibrator
+from finrisk.modeling.calibration import ProbabilityCalibrator, array_fingerprint
 
 
 def _inputs(labels, probabilities, partition: str):
@@ -41,9 +41,41 @@ def _reliability_bins(y, p):
     return result
 
 
+RANKING_TOLERANCE = 1e-12
+
+
+def _assert_fit_partition(calibrator, pv, yv, pt, yt) -> str:
+    """Verify the calibrator was fit on validation, by reading what it recorded.
+
+    Note the limit of this boundary: the function receives bare arrays and cannot
+    know an array's provenance, so "reject test data" is not expressible here.
+    What is expressible -- and what this checks -- is that the calibrator's own
+    record of its fit inputs matches validation and differs from test.
+    """
+    observed = getattr(calibrator, "fit_fingerprint_", None)
+    if observed is None:
+        raise ValueError("Calibrator did not record its fit inputs; leakage cannot be verified")
+    if observed != array_fingerprint(pv, yv):
+        raise ValueError("Calibrator fit inputs do not match the validation partition")
+    if observed == array_fingerprint(pt, yt):
+        raise ValueError("Calibrator was fit on the test partition")
+    return observed
+
+
+def _assert_ranking_preserved(method: str, raw: float | None, calibrated: float | None) -> None:
+    """Platt is strictly monotone, so ROC-AUC must be bit-identical; any drift is
+    a pipeline bug. Isotonic is weakly monotone and may only lose ranking."""
+    if raw is None or calibrated is None:
+        return
+    if method == "platt" and abs(calibrated - raw) > RANKING_TOLERANCE:
+        raise ValueError(f"Platt calibration altered ROC-AUC by {calibrated - raw:.3e}")
+    if method == "isotonic" and calibrated - raw > RANKING_TOLERANCE:
+        raise ValueError(f"Isotonic calibration increased ROC-AUC by {calibrated - raw:.3e}")
+
+
 def probability_evidence(
     y_validation, p_validation, y_test, p_test, method: str = "platt", *,
-    artifact_dir: Path | None = None,
+    artifact_dir: Path | None = None, _calibrator_factory=ProbabilityCalibrator,
 ) -> dict:
     """Fit on validation only; evaluate the preselected method on test.
 
@@ -54,7 +86,8 @@ def probability_evidence(
     yt, pt = _inputs(y_test, p_test, "test")
     if np.unique(yv).size != 2:
         raise ValueError("validation: calibration requires both outcome classes")
-    calibrator = ProbabilityCalibrator(method).fit(pv, yv)
+    calibrator = _calibrator_factory(method).fit(pv, yv)
+    fit_fingerprint = _assert_fit_partition(calibrator, pv, yv, pt, yt)
     _, calibrated = _inputs(yt, calibrator.predict(pt), "calibrated test")
     baseline_probability = float(yv.mean())
     constant = np.full(len(yt), baseline_probability, dtype=float)
@@ -66,6 +99,7 @@ def probability_evidence(
         "calibration_method": method,
         "method_selection": "fixed_before_test_evaluation",
         "fit_partition": "validation",
+        "fit_fingerprint": fit_fingerprint,
         "evaluation_partition": "test",
         "validation_rows": int(len(yv)),
         "validation_positives": int(yv.sum()),
@@ -101,6 +135,8 @@ def probability_evidence(
         },
         "versions": {"numpy": np.__version__, "scikit_learn": sklearn.__version__},
     }
+    _assert_ranking_preserved(method, report["ranking"]["raw_roc_auc"],
+                              report["ranking"]["calibrated_roc_auc"])
     if artifact_dir is not None:
         artifact_dir = Path(artifact_dir)
         artifact_dir.mkdir(parents=True, exist_ok=True)
