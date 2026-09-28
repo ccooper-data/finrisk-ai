@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np,pandas as pd
 from sklearn.metrics import average_precision_score,roc_auc_score,brier_score_loss
 from finrisk.modeling.sequences import build_sequence_arrays
+from finrisk.modeling.probability_evidence import cohort_input_evidence, probability_evidence
 
 def _tf():
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL","2")
@@ -15,7 +16,7 @@ def _metrics(y,p):
             "pr_auc":float(average_precision_score(y,p)),"roc_auc":float(roc_auc_score(y,p)),
             "brier":float(brier_score_loss(y,p))}
 
-def train_tensorflow_gru(frame,epochs=40,batch_size=2048):
+def train_tensorflow_gru(frame,epochs=40,batch_size=2048,*,calibration_out_dir:Path|None=None):
     tf=_tf();seed=42;random.seed(seed);np.random.seed(seed);tf.keras.utils.set_random_seed(seed)
     try:tf.config.experimental.enable_op_determinism()
     except Exception:pass
@@ -33,10 +34,16 @@ def train_tensorflow_gru(frame,epochs=40,batch_size=2048):
     callbacks=[tf.keras.callbacks.EarlyStopping(monitor="val_pr_auc",mode="max",patience=7,min_delta=1e-5,restore_best_weights=True)]
     hist=model.fit(seq[tr],y[tr],validation_data=(seq[va],y[va]),epochs=epochs,batch_size=batch_size,
                    class_weight=weights,callbacks=callbacks,shuffle=True,verbose=2)
-    metrics={}
+    metrics={};predictions={}
     for name,mask in masks.items():
         idx=np.where(mask)[0];p=model.predict(seq[idx],batch_size=8192,verbose=0).reshape(-1)
+        predictions[name]=p
         metrics[name]=_metrics(y[idx].astype(int),p)
+    metrics["test"]["calibration"] = probability_evidence(
+        y[masks["validation"]], predictions["validation"],
+        y[masks["test"]], predictions["test"],
+        method="platt", artifact_dir=calibration_out_dir,
+    )
     history=[{"epoch":i+1,"train_loss":float(hist.history["loss"][i]),"validation_pr_auc":float(hist.history["val_pr_auc"][i])}
              for i in range(len(hist.history["loss"]))]
     config={**meta,"parameters":int(model.count_params()),"epochs_ran":len(history),
@@ -44,7 +51,9 @@ def train_tensorflow_gru(frame,epochs=40,batch_size=2048):
     return model,metrics,config,history
 
 def run_tensorflow_gru(cohort_path:Path,out_dir:Path):
-    model,metrics,config,history=train_tensorflow_gru(pd.read_parquet(cohort_path));out_dir.mkdir(parents=True,exist_ok=True)
-    evidence={"model":"tensorflow_gru","framework":"tensorflow","metrics":metrics,"config":config,"history":history}
-    (out_dir/"tensorflow_gru_metrics.json").write_text(json.dumps(evidence,indent=2,sort_keys=True))
+    provenance=cohort_input_evidence(cohort_path)
+    model,metrics,config,history=train_tensorflow_gru(pd.read_parquet(cohort_path),calibration_out_dir=out_dir)
+    out_dir.mkdir(parents=True,exist_ok=True)
+    evidence={"model":"tensorflow_gru","framework":"tensorflow","metrics":metrics,"config":config,"history":history,"input":provenance}
+    (out_dir/"tensorflow_gru_metrics.json").write_text(json.dumps(evidence,indent=2,sort_keys=True,allow_nan=False))
     model.save(out_dir/"tensorflow_gru.keras");return evidence

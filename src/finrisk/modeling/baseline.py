@@ -4,14 +4,16 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 
+import joblib
 import numpy as np
 import pandas as pd
-from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+
+from finrisk.modeling.probability_evidence import cohort_input_evidence, probability_evidence
 
 FEATURES = [
     "current_ratio","liabilities_to_assets","liabilities_to_equity","roa","roe",
@@ -45,7 +47,10 @@ def _metrics(y,p):
         "brier":float(brier_score_loss(y,p)),
     }
 
-def train_logistic_baseline(frame: pd.DataFrame, split: TemporalSplit = TemporalSplit()):
+def train_logistic_baseline(
+    frame: pd.DataFrame, split: TemporalSplit = TemporalSplit(), *,
+    calibration_out_dir: Path | None = None,
+):
     train,val,test=temporal_split(frame,split)
     features=[c for c in FEATURES if c in frame.columns]
     if not features: raise ValueError("No baseline features available")
@@ -55,16 +60,24 @@ def train_logistic_baseline(frame: pd.DataFrame, split: TemporalSplit = Temporal
         ("model",LogisticRegression(max_iter=1000,class_weight="balanced",random_state=42)),
     ])
     pipe.fit(train[features],train["distress_12m"].astype(int))
-    results={}
+    results={};predictions={}
     for name,part in [("train",train),("validation",val),("test",test)]:
         p=pipe.predict_proba(part[features])[:,1]
+        predictions[name]=p
         results[name]=_metrics(part["distress_12m"].astype(int).to_numpy(),p)
+    results["test"]["calibration"] = probability_evidence(
+        val["distress_12m"].to_numpy(), predictions["validation"],
+        test["distress_12m"].to_numpy(), predictions["test"],
+        method="platt", artifact_dir=calibration_out_dir,
+    )
     return pipe,results,{"features":features,"train_end":split.train_end,"validation_end":split.validation_end}
 
 def run_baseline(cohort_path: Path, out_dir: Path):
+    provenance=cohort_input_evidence(cohort_path)
     frame=pd.read_parquet(cohort_path)
-    model,metrics,config=train_logistic_baseline(frame)
+    model,metrics,config=train_logistic_baseline(frame,calibration_out_dir=out_dir)
     out_dir.mkdir(parents=True,exist_ok=True)
-    evidence={"model":"logistic_regression","metrics":metrics,"config":config}
-    (out_dir/"baseline_metrics.json").write_text(json.dumps(evidence,indent=2,sort_keys=True))
+    evidence={"model":"logistic_regression","metrics":metrics,"config":config,"input":provenance}
+    joblib.dump(model,out_dir/"baseline_model.joblib")
+    (out_dir/"baseline_metrics.json").write_text(json.dumps(evidence,indent=2,sort_keys=True,allow_nan=False))
     return evidence
