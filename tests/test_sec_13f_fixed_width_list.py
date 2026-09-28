@@ -74,3 +74,43 @@ def test_invalid_cusip_rows_fail_the_assertion_rather_than_being_dropped_silentl
     assert report["cusip_valid_rate"] < 1.0
     with pytest.raises(ValueError, match="CUSIP validity below 100%"):
         assert_text_list_fidelity(report, "2024Q1", min_rows=1)
+
+
+# --- Option rows (regression: 2026Q2) ------------------------------------------
+#
+# 2026Q2 reintroduced CALL/PUT rows -- 12,220 of 25,333. Their pseudo-CUSIPs are
+# built by substituting 90/95 into the issue field without recomputing the check
+# digit, so pooling them with the securities drops validity to 53.32% and trips
+# the 100% gate. That is a property of the list's contents, not parser fidelity.
+OPTION_LINES = [
+    _line("B38564108", "*", "CMB.TECH NV", "SHS"),
+    _line("B38564908", " ", "CMB.TECH NV", "CALL"),
+    _line("B38564958", " ", "CMB.TECH NV", "PUT"),
+]
+OPTION_TEXT = "\n".join(OPTION_LINES) + "\n"
+
+def test_option_pseudo_cusips_fail_the_check_digit():
+    from finrisk.identity.identifier_corroboration import valid_cusip
+    assert valid_cusip("B38564108")
+    assert not valid_cusip("B38564908")
+    assert not valid_cusip("B38564958")
+
+def test_option_rows_are_partitioned_out_of_the_fidelity_denominator():
+    report = text_list_fidelity(OPTION_TEXT)
+    assert report["candidate_rows"] == 3
+    assert report["option_rows"] == 2
+    assert report["security_rows"] == 1
+    assert report["cusip_valid_rate"] == 1.0
+    assert_text_list_fidelity(report, "2026Q2", min_rows=1)
+
+def test_pooling_options_would_have_failed_the_gate():
+    """Guards the 2026Q2 regression: the denominator must exclude options."""
+    report = text_list_fidelity(OPTION_TEXT)
+    pooled = report["cusip_valid_rows"] / report["candidate_rows"]
+    assert pooled < 1.0
+    assert report["cusip_valid_rate"] == 1.0
+
+def test_option_rows_are_excluded_from_the_parsed_frame():
+    frame = parse_official_13f_fixed_width(OPTION_TEXT)
+    assert list(frame["cusip"]) == ["B38564108"]
+    assert not frame["issuer_description"].str.upper().isin({"CALL", "PUT"}).any()
