@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -e ".[dev]" pdfplumber
+      - run: pip install -e ".[dev]"
       - run: python -m compileall -q src scripts
       - run: pytest -q
       - run: python scripts/probe_positional_13f_fidelity.py
