@@ -7,7 +7,7 @@ def _losses(y,p):
     return {"brier":float(brier_score_loss(y,p)),
             "log_loss":float(log_loss(y,p,labels=[0,1]))}
 
-def paired_cik_cluster_bootstrap(y,p_model,p_baseline,ciks,*,replicates=10000,seed=42,baseline_fit_partition="validation"):
+def paired_cik_cluster_bootstrap(y,p_model,baseline_probability,ciks,*,replicates=10000,seed=42,baseline_fit_partition="validation"):
     y=np.asarray(y,dtype=int);pm=np.asarray(p_model,dtype=float);pb=np.asarray(p_baseline,dtype=float)
     c=np.asarray(ciks,dtype=str)
     if not(len(y)==len(pm)==len(pb)==len(c)) or not len(y):raise ValueError("aligned nonempty arrays required")
@@ -32,7 +32,7 @@ def paired_cik_cluster_bootstrap(y,p_model,p_baseline,ciks,*,replicates=10000,se
     return {"method":"paired_cik_cluster_bootstrap","seed":seed,"replicates":replicates,
             "test_rows":int(len(y)),"unique_test_ciks":int(len(unique)),
             "comparison":"validation-fitted constant minus calibrated model; positive favors model",
-            "baseline_fit_partition":baseline_fit_partition,
+            "baseline_fit_partition":baseline_fit_partition,\n            "baseline_probability":baseline_probability,
             "metrics":metrics,
             "scope":{"conditional_on_fitted_model_and_calibrator":True,
                      "includes_retraining_uncertainty":False,
