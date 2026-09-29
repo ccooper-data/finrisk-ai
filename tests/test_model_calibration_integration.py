@@ -118,7 +118,7 @@ def test_run_wrapper_passes_artifact_destination_and_records_input_hash(
         if module_name == "baseline":
             return {"fixture": True}, {}, {}
         if module_name == "boosted_tree":
-            return {"fixture": True}, {"fixture": True}, {}, {}
+            return {"fixture": True}, {"fixture": True}, {}, {"features": ["current_ratio", "roa"]}
         return FakeModel(), {}, {}, []
 
     monkeypatch.setattr(module, train_name, fake_train)
