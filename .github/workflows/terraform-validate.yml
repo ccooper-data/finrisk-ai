@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - "infra/terraform/**"
+      - "infra/k8s/**"
+      - "infra/tests/**"
       - ".github/workflows/terraform-validate.yml"
   workflow_dispatch:
 
@@ -24,3 +26,9 @@ jobs:
         run: terraform -chdir=infra/terraform init -backend=false
       - name: Terraform validate
         run: terraform -chdir=infra/terraform validate
+      - name: Compile infrastructure acceptance tests
+        run: python -m compileall -q infra/tests
+      - name: Network architecture acceptance
+        run: python infra/tests/test_network_foundation.py
+      - name: EKS architecture acceptance
+        run: python infra/tests/test_eks_foundation.py

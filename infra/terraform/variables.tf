@@ -56,3 +56,43 @@ variable "enable_nat_gateway" {
   type        = bool
   default     = false
 }
+
+variable "enable_eks" {
+  description = "Create the billable EKS validation environment. Defaults false to protect the portfolio budget."
+  type        = bool
+  default     = false
+}
+
+variable "eks_cluster_version" {
+  description = "Pinned Kubernetes minor version for the portfolio EKS cluster."
+  type        = string
+  default     = "1.33"
+}
+
+variable "eks_node_instance_types" {
+  description = "Small worker types for bounded portfolio validation."
+  type        = list(string)
+  default     = ["t3.small"]
+}
+
+variable "eks_node_desired_size" {
+  description = "Desired worker count during a bounded EKS validation window."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.eks_node_desired_size >= 1 && var.eks_node_desired_size <= 2
+    error_message = "Portfolio EKS desired capacity is capped at two workers."
+  }
+}
+
+variable "eks_public_access_cidrs" {
+  description = "Explicit operator CIDRs allowed to reach the EKS public API during bounded validation. Empty means private-only API access."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = !contains(var.eks_public_access_cidrs, "0.0.0.0/0")
+    error_message = "EKS API access must never be open to 0.0.0.0/0."
+  }
+}
