@@ -32,3 +32,5 @@ jobs:
         run: python infra/tests/test_network_foundation.py
       - name: EKS architecture acceptance
         run: python infra/tests/test_eks_foundation.py
+      - name: Cloud security acceptance
+        run: python infra/tests/test_security_foundation.py
