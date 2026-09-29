@@ -85,3 +85,14 @@ variable "eks_node_desired_size" {
     error_message = "Portfolio EKS desired capacity is capped at two workers."
   }
 }
+
+variable "eks_public_access_cidrs" {
+  description = "Explicit operator CIDRs allowed to reach the EKS public API during bounded validation. Empty means private-only API access."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = !contains(var.eks_public_access_cidrs, "0.0.0.0/0")
+    error_message = "EKS API access must never be open to 0.0.0.0/0."
+  }
+}
