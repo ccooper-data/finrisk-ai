@@ -33,3 +33,26 @@ variable "budget_alert_email" {
   default     = null
   nullable    = true
 }
+
+variable "vpc_cidr" {
+  description = "CIDR block for the FinRisk-AI portfolio VPC."
+  type        = string
+  default     = "10.42.0.0/16"
+}
+
+variable "availability_zones" {
+  description = "Two AZs used for the production-shaped network."
+  type        = list(string)
+  default     = ["us-east-1a", "us-east-1b"]
+
+  validation {
+    condition     = length(var.availability_zones) == 2
+    error_message = "FinRisk-AI network design requires exactly two Availability Zones."
+  }
+}
+
+variable "enable_nat_gateway" {
+  description = "Create NAT only during active integration tests. Default false protects the portfolio budget."
+  type        = bool
+  default     = false
+}
