@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import platform
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +11,7 @@ import pandas as pd
 
 from finrisk.modeling.baseline import TemporalSplit
 from finrisk.modeling.pytorch_gru import train_pytorch_gru
+from finrisk.modeling.run_environment import run_environment
 
 SEEDS = (11, 23, 42, 71, 101)
 COHORT_SHA256 = "c759d1223f5c7b6454ac17b31943cff8aa4b0f260a3097fe7b5b35dd50d24491"
@@ -50,9 +50,30 @@ def summarize_runs(runs: list[dict]) -> dict:
             "interpretation": "checkpoint-selected validation sensitivity, not held-out performance"}
 
 
+def _sweep_environment() -> dict:
+    """Capture shared runtime evidence, retaining the original flat field types.
+
+    The complete recorder output is retained under ``runtime``. In particular,
+    legacy ``torch`` remains a version string rather than becoming a dictionary.
+    Capture anew before each seed; equal metadata must not be assumed by copying
+    the plan's snapshot into every result.
+    """
+    runtime = run_environment(sequence_preprocessing=True)
+    torch_state = runtime["torch"]
+    return {
+        "python": runtime["python"], "platform": runtime["platform"],
+        "numpy": runtime["numpy"], "pandas": runtime["pandas"],
+        "scikit_learn": runtime["scikit_learn"],
+        "torch": torch_state.get("version"),
+        "torch_threads": torch_state.get("threads"),
+        "deterministic_algorithms": torch_state.get("deterministic_algorithms"),
+        "sequence_preprocessing_version": runtime["sequence_preprocessing_version"],
+        "runtime": runtime,
+    }
+
+
 def run_seed_sweep(cohort_path: Path, output: Path) -> dict:
     """Use the frozen cohort; exclude test rows before invoking any trainer."""
-    import sklearn
     import torch
 
     cohort_path, output = Path(cohort_path), Path(output)
@@ -61,11 +82,7 @@ def run_seed_sweep(cohort_path: Path, output: Path) -> dict:
         raise ValueError("frozen cohort SHA-256 mismatch; no training started")
     # Never silently mix outputs from a previous or partially completed sweep.
     output.mkdir(parents=True, exist_ok=False)
-    environment = {"python": platform.python_version(), "torch": torch.__version__,
-                   "numpy": np.__version__, "pandas": pd.__version__,
-                   "scikit_learn": sklearn.__version__, "platform": platform.platform(),
-                   "torch_threads": torch.get_num_threads(),
-                   "deterministic_algorithms": torch.are_deterministic_algorithms_enabled()}
+    environment = _sweep_environment()
     plan = {"seeds": list(SEEDS), "seed_42_previously_observed": True,
             "epochs_max": 40, "batch_size": 2048, "patience": 7,
             "minimum_validation_ap_improvement": 1e-5,
@@ -86,7 +103,7 @@ def run_seed_sweep(cohort_path: Path, output: Path) -> dict:
     for seed in SEEDS:
         directory = output / f"seed-{seed}"
         row = {"seed": seed, "cohort_sha256": digest, "code_commit": plan["code_commit"],
-               "environment": environment}
+               "environment": _sweep_environment()}
         try:
             model, metrics, config, history = train_pytorch_gru(
                 frame.copy(deep=True), epochs=40, batch_size=2048, seed=seed,

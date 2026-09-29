@@ -6,6 +6,7 @@ from sklearn.metrics import average_precision_score,roc_auc_score,brier_score_lo
 from finrisk.modeling.sequences import build_sequence_arrays
 from finrisk.modeling.probability_evidence import cohort_input_evidence, probability_evidence
 from finrisk.modeling import observation_identity
+from finrisk.modeling.run_environment import run_environment
 
 def _tf():
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL","2")
@@ -71,6 +72,6 @@ def run_tensorflow_gru(cohort_path:Path,out_dir:Path):
     provenance=cohort_input_evidence(cohort_path)
     model,metrics,config,history=train_tensorflow_gru(pd.read_parquet(cohort_path),calibration_out_dir=out_dir)
     out_dir.mkdir(parents=True,exist_ok=True)
-    evidence={"model":"tensorflow_gru","framework":"tensorflow","metrics":metrics,"config":config,"history":history,"input":provenance}
+    evidence={"model":"tensorflow_gru","framework":"tensorflow","metrics":metrics,"config":config,"history":history,"input":provenance,"environment":run_environment(sequence_preprocessing=True)}
     (out_dir/"tensorflow_gru_metrics.json").write_text(json.dumps(evidence,indent=2,sort_keys=True,allow_nan=False))
     model.save(out_dir/"tensorflow_gru.keras");return evidence

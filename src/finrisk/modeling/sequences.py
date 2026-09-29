@@ -14,13 +14,18 @@ SEQUENCE_FEATURES=[
     "operating_margin","net_margin","cash_to_liabilities",
 ]
 
+# Total ordering key. `filed` alone is not total: issuers file more than once on
+# a date, and an incomplete key leaves those ties to the sort algorithm.
+ORDER_KEYS=["cik","filed","adsh"]
+GROUP_ORDER_KEYS=["filed","adsh"]
+
 @dataclass(frozen=True)
 class SequenceConfig:
     lookback:int=8
     min_history:int=2
 
 def add_change_features(frame:pd.DataFrame,features:list[str])->tuple[pd.DataFrame,list[str]]:
-    out=frame.sort_values(["cik","filed","adsh"]).copy();derived=[]
+    out=frame.sort_values(ORDER_KEYS,kind="stable").copy();derived=[]
     for col in features:
         if col not in out:continue
         g=out.groupby("cik",sort=False)[col]
@@ -48,7 +53,14 @@ def build_sequence_arrays(frame:pd.DataFrame,split:TemporalSplit=TemporalSplit()
     # identifiers from `frame` afterwards would silently misalign them.
     adshs=[];events=[]
     for cik,g in x.groupby("cik",sort=False):
-        g=g.sort_values("filed")
+        # `g.sort_values("filed")` with the default (unstable) quicksort could
+        # permute same-day filings, and the permutation depends on the whole
+        # frame -- so adding or removing STRICTLY LATER rows changed the order of
+        # EARLIER same-day rows, and therefore which rows fell inside a past
+        # observation's lookback window. No future-dated value entered a history,
+        # but the feature tensor was not a function of {filed <= T} alone, which
+        # is the point-in-time reconstruction property this project claims.
+        g=g.sort_values(GROUP_ORDER_KEYS,kind="stable")
         idx=g["_row"].to_numpy()
         for pos,row_idx in enumerate(idx):
             start=max(0,pos-config.lookback+1);hist=idx[start:pos+1]
