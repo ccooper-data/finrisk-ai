@@ -10,6 +10,8 @@ checks = {
     "EKS defaults disabled": 'variable "enable_eks"' in variables and "default     = false" in variables,
     "worker max capped at 2": "max_size     = 2" in eks,
     "private subnet placement": "subnet_ids      = aws_subnet.private[*].id" in eks,
+    "private-only API by default": "endpoint_public_access  = length(var.eks_public_access_cidrs) > 0" in eks,
+    "world-open API prohibited": \'!contains(var.eks_public_access_cidrs, "0.0.0.0/0")\' in variables,
     "non-root pod": "runAsNonRoot: true" in manifest,
     "no privilege escalation": "allowPrivilegeEscalation: false" in manifest,
     "all capabilities dropped": 'drop: ["ALL"]' in manifest,
