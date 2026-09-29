@@ -48,7 +48,6 @@ def execute_real_sec_build(user_agent:str,cache_dir:Path,out_dir:Path,config:Coh
     try:
         diagnostics=[]
         cohort,events=build_labeled_sec_cohort(config,user_agent,cache_dir,diagnostics=diagnostics)
-        cohort=cohort.loc[cohort["label_mature"]].copy()
         return write_run_evidence(out_dir,config,cohort,events,cache_dir,diagnostics=diagnostics)
     except Exception as exc:
         failure={"artifact_version":1,"created_utc":datetime.now(timezone.utc).isoformat(),"status":"failed",
