@@ -1,0 +1,119 @@
+name: Deploy FinRisk Inference
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Immutable ECR image tag (must be sha-<40 hex commit>)"
+        required: true
+        type: string
+      cluster_name:
+        description: "Explicit bounded-validation EKS cluster name"
+        required: true
+        type: string
+      aws_region:
+        description: "AWS region"
+        required: true
+        default: "us-east-1"
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: finrisk-portfolio-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment: portfolio-validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate immutable image identity
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          python - <<'PY'
+          import os, re
+          tag = os.environ["IMAGE_TAG"]
+          if not re.fullmatch(r"sha-[0-9a-f]{40}", tag):
+              raise SystemExit("image_tag must be immutable sha-<40 lowercase hex>")
+          PY
+
+      - name: Configure short-lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Resolve immutable ECR image digest
+        id: image
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          repo="${{ vars.ECR_REPOSITORY }}"
+          digest="$(aws ecr describe-images --repository-name "$repo" --image-ids imageTag="$IMAGE_TAG" --query 'imageDetails[0].imageDigest' --output text)"
+          test -n "$digest" && test "$digest" != "None"
+          echo "uri=${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/$repo@$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Configure kubeconfig
+        run: aws eks update-kubeconfig --name "${{ inputs.cluster_name }}" --region "${{ inputs.aws_region }}"
+
+      - name: Capture rollback target
+        id: previous
+        run: |
+          previous="$(kubectl -n finrisk get deployment finrisk-inference -o jsonpath='{.spec.template.spec.containers[0].image}')"
+          test -n "$previous"
+          echo "image=$previous" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy exact image digest
+        id: rollout
+        continue-on-error: true
+        run: |
+          kubectl -n finrisk set image deployment/finrisk-inference inference="${{ steps.image.outputs.uri }}"
+          kubectl -n finrisk rollout status deployment/finrisk-inference --timeout=180s
+
+      - name: Verify readiness
+        id: readiness
+        if: steps.rollout.outcome == 'success'
+        continue-on-error: true
+        run: |
+          ready="$(kubectl -n finrisk get deployment finrisk-inference -o jsonpath='{.status.readyReplicas}')"
+          desired="$(kubectl -n finrisk get deployment finrisk-inference -o jsonpath='{.spec.replicas}')"
+          test "${ready:-0}" -ge "${desired:-1}"
+
+      - name: Roll back failed deployment
+        if: steps.rollout.outcome != 'success' || steps.readiness.outcome != 'success'
+        run: |
+          kubectl -n finrisk set image deployment/finrisk-inference inference="${{ steps.previous.outputs.image }}"
+          kubectl -n finrisk rollout status deployment/finrisk-inference --timeout=180s
+
+      - name: Fail after verified rollback
+        if: steps.rollout.outcome != 'success' || steps.readiness.outcome != 'success'
+        run: |
+          echo "Deployment failed and rollback was executed."
+          exit 1
+
+      - name: Record deployment evidence
+        if: success()
+        run: |
+          mkdir -p evidence
+          {
+            echo "git_sha=${GITHUB_SHA}"
+            echo "requested_tag=${{ inputs.image_tag }}"
+            echo "image_uri=${{ steps.image.outputs.uri }}"
+            echo "cluster=${{ inputs.cluster_name }}"
+            echo "deployment_revision=$(kubectl -n finrisk rollout history deployment/finrisk-inference | tail -n 1)"
+          } > evidence/deployment.txt
+
+      - name: Upload deployment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: finrisk-deployment-evidence
+          path: evidence/
+          if-no-files-found: ignore
+          retention-days: 7
