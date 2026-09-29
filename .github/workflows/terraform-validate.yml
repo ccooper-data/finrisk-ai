@@ -1,0 +1,26 @@
+name: Terraform Static Validation
+
+on:
+  pull_request:
+    paths:
+      - "infra/terraform/**"
+      - ".github/workflows/terraform-validate.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+      - name: Terraform format
+        run: terraform -chdir=infra/terraform fmt -check -recursive
+      - name: Terraform init without backend
+        run: terraform -chdir=infra/terraform init -backend=false
+      - name: Terraform validate
+        run: terraform -chdir=infra/terraform validate
