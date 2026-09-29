@@ -1,10 +1,11 @@
-"""Record what produced a run, so a later audit can tell drift from noise.
+"""Record runtime and preprocessing evidence for supported model run paths.
 
-The seed-42 discrepancy that motivated this had two candidate causes: unstable
-same-day ordering (fixed in modeling.sequences) and library drift. The second is
-permanently unresolvable for that run because it recorded no versions at all --
-so the discrepancy cannot be attributed, only superseded. Every run records this
-now.
+The earlier seed-42 artifact recorded NumPy and scikit-learn versions in its
+calibration evidence, but not a complete training environment. That limits
+attribution of its discrepancy; it does not invalidate metrics replayed from
+saved predictions. The sequence-ordering defect is independently demonstrated.
+Recording this snapshot improves traceability, not a guarantee of deterministic
+training or a proof that a previous discrepancy had only one cause.
 """
 from __future__ import annotations
 
