@@ -42,8 +42,16 @@ finrisk build-sec-cohort --start-year 2025 --end-year 2025 --end-quarter 4
 
 See [docs/REAL_RUN.md](docs/REAL_RUN.md).
 
-## Status
+## Version 1 evidence freeze
 
-The research system has been developed through a validated local Milestone 14 baseline. The public repository is being populated in controlled increments, with CI verifying the published execution contract before real model metrics are reported.
+Version 1 uses a source-hashed SEC cohort with 365-day outcome-window maturity enforced before modelling. The chronological test population contains 64,194 complete-window observations, including 669 SEC 8-K Item 1.03 distress positives (1.042% prevalence). Sequence models require prior history, so the final PyTorch GRU evaluates 63,322 observations with 666 positives (1.052% prevalence).
 
-No recruiter-facing performance number is published until it is tied to a source-hashed real historical cohort.
+The predeclared seed-42 PyTorch GRU achieved **ROC-AUC 0.8103**, **average precision 0.0540**, and **5.13x average-precision lift over prevalence** on its maturity-filtered held-out population. This is a single fitted-model test result, not a multi-seed test estimate. A separate five-seed validation sensitivity experiment was completed before the Version 1 freeze.
+
+The boosted tree and PyTorch GRU both show predictive value, but Version 1 does **not** claim one architecture outperforms the other. On their common 63,322-observation test population, issuer-clustered paired bootstrap intervals crossed zero for average precision, ROC-AUC, calibrated Brier score, and calibrated log loss.
+
+Both promoted nonlinear models improved probability-quality metrics over their validation-fitted constant benchmarks. Calibration is reported component-wise: the final GRU's joint recalibration slope is approximately 1.001, while its calibration-in-the-large offset remains positive, consistent with underprediction of the later test-period event level.
+
+Earlier experimental figures from pre-repair sequence ordering or incomplete outcome windows are superseded and are not Version 1 performance claims.
+
+See [docs/V1_MODEL_CARD.md](docs/V1_MODEL_CARD.md) for the evidence scope, limitations, and interpretation.
