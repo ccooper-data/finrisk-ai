@@ -1,0 +1,37 @@
+name: Container Validation
+
+on:
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "pyproject.toml"
+      - "src/**"
+      - "tests/test_serving.py"
+      - ".github/workflows/container-validate.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build immutable candidate image
+        run: docker build --pull --tag "finrisk-ai:sha-${GITHUB_SHA}" .
+
+      - name: Verify container runs as non-root
+        run: |
+          uid="$(docker run --rm --entrypoint id "finrisk-ai:sha-${GITHUB_SHA}" -u)"
+          test "$uid" != "0"
+
+      - name: Inspect declared health check
+        run: |
+          test "$(docker inspect --format='{{json .Config.Healthcheck.Test}}' "finrisk-ai:sha-${GITHUB_SHA}")" != "null"
+
+      - name: Record image identity
+        run: |
+          docker image inspect "finrisk-ai:sha-${GITHUB_SHA}"             --format='candidate_tag=sha-${{ github.sha }} image_id={{.Id}}'
