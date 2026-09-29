@@ -29,10 +29,20 @@ def test_event_after_horizon_does_not_make_immature_negative_known():
     assert pd.isna(out.loc[0,"distress_12m"])
     assert not bool(out.loc[0,"label_mature"])
 
-def test_snapshot_date_comes_from_source_file_mtime(tmp_path):
-    import os
+def test_snapshot_date_comes_from_verified_acquisition_metadata(tmp_path):
+    import hashlib,json
     from finrisk.cohort_builder import submissions_snapshot_date
     p=tmp_path/"submissions.zip";p.write_bytes(b"x")
-    ts=pd.Timestamp("2026-09-25T12:00:00Z").timestamp()
-    os.utime(p,(ts,ts))
+    meta={"url":"https://www.sec.gov/example","acquired_utc":"2026-09-25T12:00:00+00:00",
+          "bytes":1,"sha256":hashlib.sha256(b"x").hexdigest()}
+    (tmp_path/"submissions.zip.source.json").write_text(json.dumps(meta))
     assert submissions_snapshot_date(p)==pd.Timestamp("2026-09-25")
+
+def test_snapshot_metadata_hash_mismatch_fails_closed(tmp_path):
+    import json,pytest
+    from finrisk.cohort_builder import submissions_snapshot_date
+    p=tmp_path/"submissions.zip";p.write_bytes(b"x")
+    (tmp_path/"submissions.zip.source.json").write_text(json.dumps(
+        {"acquired_utc":"2026-09-25T12:00:00+00:00","bytes":1,"sha256":"bad"}))
+    with pytest.raises(ValueError,match="does not match"):
+        submissions_snapshot_date(p)
