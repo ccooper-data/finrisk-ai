@@ -69,6 +69,6 @@ def run_boosted_tree(cohort_path:Path,out_dir:Path):
     model,imputer,metrics,config=train_boosted_tree(frame,calibration_out_dir=out_dir)
     out_dir.mkdir(parents=True,exist_ok=True)
     evidence={"model":"hist_gradient_boosting","metrics":metrics,"config":config,"input":provenance,"environment":run_environment(sequence_preprocessing=False)}
-    joblib.dump({"model":model,"imputer":imputer},out_dir/"boosted_tree_model.joblib")
+    joblib.dump({"model": model, "imputer": imputer, "features": config["features"]}, out_dir / "boosted_tree_model.joblib")
     (out_dir/"boosted_tree_metrics.json").write_text(json.dumps(evidence,indent=2,sort_keys=True,allow_nan=False))
     return evidence
