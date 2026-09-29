@@ -20,10 +20,10 @@ jobs:
       - name: Download validated full cohort artifact
         uses: actions/download-artifact@v4
         with:
-          name: finrisk-sec-cohort-full-36201584816
+          name: finrisk-sec-cohort-full-36626740566
           path: artifacts/source
           github-token: ${{ github.token }}
-          run-id: 36201584816
+          run-id: 36626740566
       - name: Train chronological logistic baseline
         run: finrisk train-baseline --cohort artifacts/source/sec-cohort-full/sec_labeled_cohort.parquet --out-dir artifacts/modeling/baseline
       - name: Upload baseline evidence
