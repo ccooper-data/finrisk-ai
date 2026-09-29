@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 import json
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 import zipfile
@@ -28,27 +29,51 @@ def quarters(config):
         for q in range(1,last+1):out.append(Quarter(year,q))
     return out
 
+def _file_sha256(path:Path)->str:
+    h=hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda:f.read(1024*1024),b""):h.update(chunk)
+    return h.hexdigest()
+
+def _submissions_metadata_path(path:Path)->Path:
+    return path.with_name(path.name+".source.json")
+
 def download_submissions_bulk(user_agent:str,cache_dir:Path)->Path:
     if "@" not in user_agent:raise ValueError("SEC User-Agent must contain a contact email")
     cache_dir.mkdir(parents=True,exist_ok=True);path=cache_dir/"submissions.zip"
-    if path.exists() and path.stat().st_size>0:return path
+    metadata_path=_submissions_metadata_path(path)
+    if path.exists() and path.stat().st_size>0:
+        if not metadata_path.exists():
+            raise ValueError("cached SEC submissions archive lacks acquisition metadata; refresh required")
+        metadata=json.loads(metadata_path.read_text(encoding="utf-8"))
+        if metadata.get("sha256")!=_file_sha256(path) or metadata.get("bytes")!=path.stat().st_size:
+            raise ValueError("cached SEC submissions archive does not match acquisition metadata")
+        return path
     headers={"User-Agent":user_agent,"Accept-Encoding":"gzip, deflate"}
+    acquired=datetime.now(timezone.utc)
     with httpx.stream("GET",SEC_SUBMISSIONS_BULK,headers=headers,timeout=180) as r:
         r.raise_for_status()
         with path.open("wb") as f:
             for chunk in r.iter_bytes():f.write(chunk)
+    metadata={"url":SEC_SUBMISSIONS_BULK,"acquired_utc":acquired.isoformat(),
+              "bytes":path.stat().st_size,"sha256":_file_sha256(path)}
+    metadata_path.write_text(json.dumps(metadata,indent=2,sort_keys=True),encoding="utf-8")
     return path
 
 def submissions_snapshot_date(path:Path)->pd.Timestamp:
-    """Observation cutoff for a frozen SEC submissions archive.
-
-    Use the local source artifact's modification time: it is conservative for a
-    freshly downloaded archive and, critically, cannot claim observation beyond
-    the cached bytes actually used by a replay.
-    """
-    if not path.exists() or path.stat().st_size <= 0:
+    """Observation cutoff bound to persisted acquisition metadata."""
+    if not path.exists() or path.stat().st_size<=0:
         raise ValueError("SEC submissions archive is missing or empty")
-    return pd.Timestamp(datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).date())
+    metadata_path=_submissions_metadata_path(path)
+    if not metadata_path.exists():
+        raise ValueError("SEC submissions acquisition metadata is required")
+    metadata=json.loads(metadata_path.read_text(encoding="utf-8"))
+    if metadata.get("sha256")!=_file_sha256(path) or metadata.get("bytes")!=path.stat().st_size:
+        raise ValueError("SEC submissions archive does not match acquisition metadata")
+    acquired=pd.Timestamp(metadata.get("acquired_utc"))
+    if pd.isna(acquired):
+        raise ValueError("SEC submissions acquisition timestamp is invalid")
+    return pd.Timestamp(acquired.date())
 
 def bankruptcy_events_from_submissions_archive(path:Path)->pd.DataFrame:
     rows=[]
