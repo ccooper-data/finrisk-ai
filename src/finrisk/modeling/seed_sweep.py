@@ -12,6 +12,7 @@ import pandas as pd
 from finrisk.modeling.baseline import TemporalSplit
 from finrisk.modeling.pytorch_gru import train_pytorch_gru
 from finrisk.modeling.run_environment import run_environment
+from finrisk.labels import load_modelling_cohort
 
 SEEDS = (11, 23, 42, 71, 101)
 COHORT_SHA256 = "c759d1223f5c7b6454ac17b31943cff8aa4b0f260a3097fe7b5b35dd50d24491"
@@ -94,7 +95,7 @@ def run_seed_sweep(cohort_path: Path, output: Path) -> dict:
             "selection_policy": "no seed selected; report every run and median/spread",
             "calibration_policy": "not fitted in this validation-only sensitivity run"}
     (output / "plan.json").write_text(json.dumps(plan, indent=2, sort_keys=True), encoding="utf-8")
-    frame = pd.read_parquet(cohort_path)
+    frame = load_modelling_cohort(cohort_path)
     dates = pd.to_datetime(frame["filed"], errors="raise")
     if dates.isna().any():
         raise ValueError("filing dates must be present")
