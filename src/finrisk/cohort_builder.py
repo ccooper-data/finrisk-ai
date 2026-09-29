@@ -85,10 +85,10 @@ def build_sec_fundamentals(config,user_agent,cache_dir,diagnostics=None):
     out=out.sort_values(["cik","filed","adsh"]).drop_duplicates(["adsh"],keep="last")
     return add_financial_ratios(out)
 
-def build_labeled_sec_cohort(config,user_agent,cache_dir,diagnostics=None):
+def build_labeled_sec_cohort(config,user_agent,cache_dir,diagnostics=None,observed_through=None):
     fundamentals=build_sec_fundamentals(config,user_agent,cache_dir,diagnostics=diagnostics)
     events=bankruptcy_events_from_submissions_archive(download_submissions_bulk(user_agent,cache_dir))
-    labeled=label_forward_distress(fundamentals,events,horizon_days=config.horizon_days)
+    labeled=label_forward_distress(fundamentals,events,horizon_days=config.horizon_days,observed_through=observed_through)
     labeled["label_window_end"]=pd.to_datetime(labeled["filed"])+pd.to_timedelta(config.horizon_days,unit="D")
     return labeled,events
 
