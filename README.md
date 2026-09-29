@@ -1,8 +1,8 @@
 # FinRisk AI
 
-**Point-in-time financial distress and risk intelligence with SEC fundamentals, macroeconomic context, market behavior, PyTorch, and TensorFlow.**
+**Point-in-time corporate financial-distress ML research with auditable temporal, calibration, and evidence controls.**
 
-FinRisk AI is a production-shaped ML research platform for estimating 12-month corporate financial-distress risk without look-ahead leakage. The project is designed around a question a skeptical reviewer can audit: *what information was actually knowable on the prediction date?*
+FinRisk AI is a production-shaped ML research pipeline for estimating 12-month corporate financial-distress risk without look-ahead leakage. The project is designed around a question a skeptical reviewer can audit: *what information was actually knowable on the prediction date?*
 
 ## Why this project is different
 
@@ -16,15 +16,16 @@ FinRisk AI is a production-shaped ML research platform for estimating 12-month c
 - Reproducible evidence manifests and SHA-256 source/cohort lineage.
 - GitHub Actions smoke/full SEC cohort execution.
 
-## Research architecture
+## Version 1 research architecture
 
 ```text
-SEC fundamentals ─────┐
-FRED/ALFRED macro ────┼──> point-in-time observation ──> temporal evaluation
-Market behavior ──────┘                                  │
-                                                         ├─ Logistic baseline
-                                                         ├─ PyTorch
-                                                         └─ TensorFlow
+SEC fundamentals ──> point-in-time observation ──> maturity gate ──> temporal evaluation
+                                                               │
+                                                               ├─ Logistic baseline
+                                                               ├─ Boosted tree
+                                                               └─ PyTorch GRU
+
+Exploratory extensions: FRED/ALFRED macro context and market-behavior contracts.
 ```
 
 ## Leakage controls
