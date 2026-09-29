@@ -37,6 +37,7 @@ def write_run_evidence(out_dir,config,cohort,events,cache_dir,diagnostics=None):
     events.to_parquet(out_dir/"distress_events.parquet",index=False)
     manifest={"artifact_version":1,"created_utc":datetime.now(timezone.utc).isoformat(),"status":"complete",
               "config":asdict(config),"inventory":cohort_inventory(cohort,events),"sources":source_manifest(cache_dir),
+              "label_observed_through":str(pd.to_datetime(cohort["label_observed_through"]).iloc[0].date()) if len(cohort) else None,
               "runtime":{"python":sys.version,"platform":platform.platform()}}
     (out_dir/"run_manifest.json").write_text(json.dumps(manifest,indent=2,sort_keys=True,default=str))
     return manifest
@@ -46,6 +47,7 @@ def execute_real_sec_build(user_agent:str,cache_dir:Path,out_dir:Path,config:Coh
     try:
         diagnostics=[]
         cohort,events=build_labeled_sec_cohort(config,user_agent,cache_dir,diagnostics=diagnostics)
+        cohort=cohort.loc[cohort["label_mature"]].copy()
         return write_run_evidence(out_dir,config,cohort,events,cache_dir,diagnostics=diagnostics)
     except Exception as exc:
         failure={"artifact_version":1,"created_utc":datetime.now(timezone.utc).isoformat(),"status":"failed",

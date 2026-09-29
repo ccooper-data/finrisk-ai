@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import zipfile
 import httpx
@@ -37,6 +38,17 @@ def download_submissions_bulk(user_agent:str,cache_dir:Path)->Path:
         with path.open("wb") as f:
             for chunk in r.iter_bytes():f.write(chunk)
     return path
+
+def submissions_snapshot_date(path:Path)->pd.Timestamp:
+    """Observation cutoff for a frozen SEC submissions archive.
+
+    Use the local source artifact's modification time: it is conservative for a
+    freshly downloaded archive and, critically, cannot claim observation beyond
+    the cached bytes actually used by a replay.
+    """
+    if not path.exists() or path.stat().st_size <= 0:
+        raise ValueError("SEC submissions archive is missing or empty")
+    return pd.Timestamp(datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).date())
 
 def bankruptcy_events_from_submissions_archive(path:Path)->pd.DataFrame:
     rows=[]
@@ -85,10 +97,12 @@ def build_sec_fundamentals(config,user_agent,cache_dir,diagnostics=None):
     out=out.sort_values(["cik","filed","adsh"]).drop_duplicates(["adsh"],keep="last")
     return add_financial_ratios(out)
 
-def build_labeled_sec_cohort(config,user_agent,cache_dir,diagnostics=None):
+def build_labeled_sec_cohort(config,user_agent,cache_dir,diagnostics=None,observed_through=None):
     fundamentals=build_sec_fundamentals(config,user_agent,cache_dir,diagnostics=diagnostics)
-    events=bankruptcy_events_from_submissions_archive(download_submissions_bulk(user_agent,cache_dir))
-    labeled=label_forward_distress(fundamentals,events,horizon_days=config.horizon_days)
+    submissions_path=download_submissions_bulk(user_agent,cache_dir)
+    events=bankruptcy_events_from_submissions_archive(submissions_path)
+    cutoff=submissions_snapshot_date(submissions_path) if observed_through is None else pd.Timestamp(observed_through)
+    labeled=label_forward_distress(fundamentals,events,horizon_days=config.horizon_days,observed_through=cutoff)
     labeled["label_window_end"]=pd.to_datetime(labeled["filed"])+pd.to_timedelta(config.horizon_days,unit="D")
     return labeled,events
 
