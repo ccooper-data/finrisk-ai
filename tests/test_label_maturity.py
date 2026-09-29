@@ -28,3 +28,11 @@ def test_event_after_horizon_does_not_make_immature_negative_known():
     out=label_forward_distress(obs,ev,observed_through="2026-09-25")
     assert pd.isna(out.loc[0,"distress_12m"])
     assert not bool(out.loc[0,"label_mature"])
+
+def test_snapshot_date_comes_from_source_file_mtime(tmp_path):
+    import os
+    from finrisk.cohort_builder import submissions_snapshot_date
+    p=tmp_path/"submissions.zip";p.write_bytes(b"x")
+    ts=pd.Timestamp("2026-09-25T12:00:00Z").timestamp()
+    os.utime(p,(ts,ts))
+    assert submissions_snapshot_date(p)==pd.Timestamp("2026-09-25")
