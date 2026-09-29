@@ -10,9 +10,9 @@ FinRisk AI is a production-shaped ML research pipeline for estimating 12-month c
 - Filing-date knowledge cutoffs instead of random train/test splitting.
 - High-confidence distress labels based on SEC 8-K Item 1.03 bankruptcy/receivership events.
 - Correct SEC duration semantics so quarterly facts are not confused with YTD values.
-- Point-in-time macro and market feature contracts.
-- Logistic-regression baseline plus PyTorch and TensorFlow model families.
-- Multimodal temporal architecture for fundamentals + market + macro histories.
+- Point-in-time macro and market feature contracts are implemented as exploratory research capabilities; they are not part of the promoted Version 1 headline model.
+- Logistic-regression baseline plus boosted-tree, PyTorch, and TensorFlow model families.
+- Version 1 promoted results are based on the audited SEC-fundamentals cohort; broader context integrations remain research extensions.
 - Reproducible evidence manifests and SHA-256 source/cohort lineage.
 - GitHub Actions smoke/full SEC cohort execution.
 
