@@ -35,7 +35,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: data/cache/sec
-          key: sec-source-cache-${{ runner.os }}-v1
+          key: sec-source-cache-${{ runner.os }}-v2
       - name: Build smoke cohort
         if: ${{ inputs.mode == 'smoke' }}
         run: finrisk build-sec-cohort --start-year 2025 --end-year 2025 --end-quarter 4 --out-dir artifacts/sec-cohort-smoke
