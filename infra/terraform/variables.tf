@@ -96,3 +96,21 @@ variable "eks_public_access_cidrs" {
     error_message = "EKS API access must never be open to 0.0.0.0/0."
   }
 }
+
+variable "github_repository" {
+  description = "GitHub owner/repository allowed to federate into AWS through OIDC."
+  type        = string
+  default     = "ccooper-data/finrisk-ai"
+}
+
+variable "github_deploy_ref" {
+  description = "Only this GitHub ref may assume the deployment role."
+  type        = string
+  default     = "refs/heads/main"
+}
+
+variable "enable_audit_trail" {
+  description = "Enable the billable/operational CloudTrail evidence path during bounded deployment validation."
+  type        = bool
+  default     = false
+}
