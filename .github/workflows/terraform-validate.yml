@@ -7,6 +7,7 @@ on:
       - "infra/k8s/**"
       - "infra/tests/**"
       - ".github/workflows/terraform-validate.yml"
+      - ".github/workflows/deploy-inference.yml"
   workflow_dispatch:
 
 permissions:
@@ -36,3 +37,5 @@ jobs:
         run: python infra/tests/test_security_foundation.py
       - name: Observability and SLO acceptance
         run: python infra/tests/test_observability_foundation.py
+      - name: Delivery and rollback acceptance
+        run: python infra/tests/test_delivery_recovery.py
