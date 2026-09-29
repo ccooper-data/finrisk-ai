@@ -41,3 +41,5 @@ jobs:
         run: python infra/tests/test_delivery_recovery.py
       - name: Final QA evidence acceptance
         run: python infra/tests/test_final_qa_evidence.py
+      - name: Live validation harness safety
+        run: python infra/tests/test_live_validation_harness.py
