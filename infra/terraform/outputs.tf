@@ -27,3 +27,8 @@ output "nat_gateway_enabled" {
   description = "Whether the intentionally opt-in NAT Gateway is enabled."
   value       = var.enable_nat_gateway
 }
+
+output "inference_ecr_repository_url" {
+  description = "Immutable ECR repository URL for FinRisk inference images."
+  value       = aws_ecr_repository.inference.repository_url
+}
