@@ -8,6 +8,7 @@ from finrisk.modeling.baseline import TemporalSplit
 from finrisk.modeling.probability_evidence import cohort_input_evidence, probability_evidence
 from finrisk.modeling import observation_identity
 from finrisk.modeling.run_environment import run_environment
+from finrisk.labels import load_modelling_cohort
 
 def _torch():
     import torch
@@ -117,7 +118,7 @@ def train_pytorch_gru(
 
 def run_pytorch_gru(cohort_path:Path,out_dir:Path):
     provenance=cohort_input_evidence(cohort_path)
-    model,metrics,config,history=train_pytorch_gru(pd.read_parquet(cohort_path),calibration_out_dir=out_dir)
+    model,metrics,config,history=train_pytorch_gru(load_modelling_cohort(cohort_path),calibration_out_dir=out_dir)
     out_dir.mkdir(parents=True,exist_ok=True)
     evidence={"model":"pytorch_gru","framework":"pytorch","metrics":metrics,"config":config,"history":history,"input":provenance,"environment":run_environment(sequence_preprocessing=True)}
     (out_dir/"pytorch_gru_metrics.json").write_text(json.dumps(evidence,indent=2,sort_keys=True,allow_nan=False))

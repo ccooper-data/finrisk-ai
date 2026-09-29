@@ -6,6 +6,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+from finrisk.labels import select_modelling_observations
 import pytest
 from sklearn.metrics import brier_score_loss
 from threadpoolctl import threadpool_limits
@@ -106,7 +107,13 @@ def test_run_wrapper_passes_artifact_destination_and_records_input_hash(
             Path(path).write_text("synthetic-model-placeholder")
 
     def fake_train(frame, *, calibration_out_dir):
-        assert frame is cohort
+        # Runners now pass the modelling selection, not the raw parquet frame, so
+        # object identity is no longer the contract -- content is, plus the
+        # guarantee that no censored pd.NA label reaches a trainer.
+        pd.testing.assert_frame_equal(
+            frame.reset_index(drop=True),
+            cohort.reset_index(drop=True), check_dtype=False)
+        assert frame["distress_12m"].notna().all()
         seen.append(calibration_out_dir)
         if module_name == "baseline":
             return {"fixture": True}, {}, {}
@@ -116,6 +123,8 @@ def test_run_wrapper_passes_artifact_destination_and_records_input_hash(
 
     monkeypatch.setattr(module, train_name, fake_train)
     monkeypatch.setattr(module.pd, "read_parquet", lambda _: cohort)
+    monkeypatch.setattr(module, "load_modelling_cohort",
+                        lambda _p: select_modelling_observations(cohort))
     if module_name == "pytorch_gru":
         class FakeTorch:
             @staticmethod

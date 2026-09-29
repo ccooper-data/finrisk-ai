@@ -11,6 +11,7 @@ from finrisk.modeling.baseline import FEATURES, TemporalSplit, temporal_split
 from finrisk.modeling.probability_evidence import cohort_input_evidence, probability_evidence
 from finrisk.modeling import observation_identity
 from finrisk.modeling.run_environment import run_environment
+from finrisk.labels import load_modelling_cohort
 
 def _metrics(y,p):
     return {"rows":int(len(y)),"positives":int(np.sum(y)),"prevalence":float(np.mean(y)),
@@ -64,7 +65,7 @@ def train_boosted_tree(
 
 def run_boosted_tree(cohort_path:Path,out_dir:Path):
     provenance=cohort_input_evidence(cohort_path)
-    frame=pd.read_parquet(cohort_path)
+    frame=load_modelling_cohort(cohort_path)
     model,imputer,metrics,config=train_boosted_tree(frame,calibration_out_dir=out_dir)
     out_dir.mkdir(parents=True,exist_ok=True)
     evidence={"model":"hist_gradient_boosting","metrics":metrics,"config":config,"input":provenance,"environment":run_environment(sequence_preprocessing=False)}

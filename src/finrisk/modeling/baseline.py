@@ -14,6 +14,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from finrisk.modeling.probability_evidence import cohort_input_evidence, probability_evidence
+from finrisk.labels import load_modelling_cohort
 
 FEATURES = [
     "current_ratio","liabilities_to_assets","liabilities_to_equity","roa","roe",
@@ -74,7 +75,7 @@ def train_logistic_baseline(
 
 def run_baseline(cohort_path: Path, out_dir: Path):
     provenance=cohort_input_evidence(cohort_path)
-    frame=pd.read_parquet(cohort_path)
+    frame=load_modelling_cohort(cohort_path)
     model,metrics,config=train_logistic_baseline(frame,calibration_out_dir=out_dir)
     out_dir.mkdir(parents=True,exist_ok=True)
     evidence={"model":"logistic_regression","metrics":metrics,"config":config,"input":provenance}

@@ -7,6 +7,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.metrics import average_precision_score,roc_auc_score,brier_score_loss
 from finrisk.features.context import macro_features,MACRO_FEATURES
 from finrisk.modeling.baseline import FEATURES,temporal_split
+from finrisk.labels import load_modelling_cohort
 
 def attach_macro(frame:pd.DataFrame,macro:pd.DataFrame)->pd.DataFrame:
     f=frame.copy();f["filed"]=pd.to_datetime(f["filed"])
@@ -28,7 +29,7 @@ def _fit_eval(frame,features):
     return out
 
 def run_macro_ablation(cohort_path:Path,macro_path:Path,out_dir:Path):
-    cohort=pd.read_parquet(cohort_path);macro=pd.read_parquet(macro_path);joined=attach_macro(cohort,macro)
+    cohort=load_modelling_cohort(cohort_path);macro=pd.read_parquet(macro_path);joined=attach_macro(cohort,macro)
     financial=[c for c in FEATURES if c in joined]
     context=[c for c in MACRO_FEATURES if c in joined]
     evidence={"status":"exploratory_current_vintage","warning":"FRED current historical values may include later revisions; not promoted as vintage-safe.",

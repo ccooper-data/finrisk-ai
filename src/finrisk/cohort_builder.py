@@ -10,7 +10,7 @@ import pandas as pd
 from finrisk.dataset import eligible_submissions, canonical_numeric_facts, build_submission_matrix
 from finrisk.features.panel import add_financial_ratios
 from finrisk.ingestion.sec_fsds import Quarter, SecFinancialStatementDatasetClient, read_table
-from finrisk.labels import label_forward_distress
+from finrisk.labels import censoring_inventory, label_forward_distress, select_modelling_observations
 
 SEC_SUBMISSIONS_BULK = "https://www.sec.gov/Archives/edgar/daily-index/bulkdata/submissions.zip"
 
@@ -131,12 +131,19 @@ def build_labeled_sec_cohort(config,user_agent,cache_dir,diagnostics=None,observ
     labeled["label_window_end"]=pd.to_datetime(labeled["filed"])+pd.to_timedelta(config.horizon_days,unit="D")
     return labeled,events
 
-def cohort_inventory(frame,events):
+def cohort_inventory(frame,events,split=None):
     filed=pd.to_datetime(frame["filed"],errors="coerce")
+    modelling=select_modelling_observations(frame) if "distress_12m" in frame else frame.iloc[0:0]
     feature_cols=[c for c in ("current_ratio","liabilities_to_assets","liabilities_to_equity","roa","roe",
         "operating_margin","net_margin","operating_cash_flow_margin","cash_to_liabilities") if c in frame]
     return {"rows":int(len(frame)),"companies":int(frame["cik"].nunique()),
         "start":str(filed.min().date()) if len(frame) else None,"end":str(filed.max().date()) if len(frame) else None,
-        "distress_events":int(len(events)),"positive_observations":int(frame["distress_12m"].sum()) if "distress_12m" in frame else 0,
-        "prevalence":float(frame["distress_12m"].mean()) if len(frame) and "distress_12m" in frame else None,
+        "distress_events":int(len(events)),
+        # These two are over the MODELLING population (complete outcome windows),
+        # not over every labelled row: pandas skips pd.NA in sum()/mean(), which
+        # would silently mix in censored positives and overstate prevalence.
+        "positive_observations":int(modelling["distress_12m"].sum()) if len(modelling) else 0,
+        "prevalence":float(modelling["distress_12m"].mean()) if len(modelling) else None,
+        "modelling_rows":int(len(modelling)),
+        "censoring":censoring_inventory(frame,split=split) if "distress_12m" in frame else None,
         "feature_coverage":{c:float(frame[c].notna().mean()) for c in feature_cols}}

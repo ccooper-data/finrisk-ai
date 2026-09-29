@@ -7,6 +7,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import average_precision_score, roc_auc_score, brier_score_loss
 from finrisk.modeling.baseline import FEATURES, TemporalSplit, temporal_split
+from finrisk.labels import load_modelling_cohort
 
 def _torch():
     import torch
@@ -60,7 +61,7 @@ def train_pytorch_mlp(frame:pd.DataFrame,split:TemporalSplit=TemporalSplit(),epo
     return model,results,config,history
 
 def run_pytorch_mlp(cohort_path:Path,out_dir:Path):
-    frame=pd.read_parquet(cohort_path);model,metrics,config,history=train_pytorch_mlp(frame)
+    frame=load_modelling_cohort(cohort_path);model,metrics,config,history=train_pytorch_mlp(frame)
     out_dir.mkdir(parents=True,exist_ok=True)
     evidence={"model":"pytorch_mlp","framework":"pytorch","metrics":metrics,"config":config,"history":history}
     (out_dir/"pytorch_mlp_metrics.json").write_text(json.dumps(evidence,indent=2,sort_keys=True))

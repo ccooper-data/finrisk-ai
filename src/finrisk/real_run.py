@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import hashlib, json, platform, sys
 from pathlib import Path
 import pandas as pd
+from finrisk.modeling.baseline import TemporalSplit
 from finrisk.cohort_builder import CohortBuildConfig, build_labeled_sec_cohort, cohort_inventory, quarters
 
 def file_sha256(path:Path,chunk_size:int=1024*1024)->str:
@@ -36,7 +37,7 @@ def write_run_evidence(out_dir,config,cohort,events,cache_dir,diagnostics=None):
     cohort.to_parquet(out_dir/"sec_labeled_cohort.parquet",index=False)
     events.to_parquet(out_dir/"distress_events.parquet",index=False)
     manifest={"artifact_version":1,"created_utc":datetime.now(timezone.utc).isoformat(),"status":"complete",
-              "config":asdict(config),"inventory":cohort_inventory(cohort,events),"sources":source_manifest(cache_dir),
+              "config":asdict(config),"inventory":cohort_inventory(cohort,events,split=TemporalSplit()),"sources":source_manifest(cache_dir),
               "label_observed_through":str(pd.to_datetime(cohort["label_observed_through"]).iloc[0].date()) if len(cohort) else None,
               "runtime":{"python":sys.version,"platform":platform.platform()}}
     (out_dir/"run_manifest.json").write_text(json.dumps(manifest,indent=2,sort_keys=True,default=str))
