@@ -34,3 +34,5 @@ jobs:
         run: python infra/tests/test_eks_foundation.py
       - name: Cloud security acceptance
         run: python infra/tests/test_security_foundation.py
+      - name: Observability and SLO acceptance
+        run: python infra/tests/test_observability_foundation.py
