@@ -119,3 +119,10 @@ def test_no_cutoff_means_nothing_is_censored():
         horizon_days=HORIZON, observed_through=None)
     assert open_ended["label_window_complete"].all()
     assert open_ended["distress_12m"].notna().all()
+
+def test_real_build_does_not_pre_filter_knowable_censored_rows():
+    import inspect
+    from finrisk import real_run
+    source=inspect.getsource(real_run.execute_real_sec_build)
+    assert 'cohort.loc[cohort["label_mature"]]' not in source
+    assert "write_run_evidence" in source
