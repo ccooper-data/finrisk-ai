@@ -30,8 +30,8 @@ resource "aws_eks_cluster" "platform" {
   vpc_config {
     subnet_ids              = aws_subnet.private[*].id
     endpoint_private_access = true
-    endpoint_public_access  = true
-    public_access_cidrs     = ["0.0.0.0/0"]
+    endpoint_public_access  = length(var.eks_public_access_cidrs) > 0
+    public_access_cidrs     = var.eks_public_access_cidrs
   }
 
   depends_on = [aws_iam_role_policy_attachment.eks_cluster]
