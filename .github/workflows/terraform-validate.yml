@@ -7,6 +7,7 @@ on:
       - "infra/k8s/**"
       - "infra/tests/**"
       - ".github/workflows/terraform-validate.yml"
+      - ".github/workflows/provision-bounded-aws.yml"
       - ".github/workflows/deploy-inference.yml"
   workflow_dispatch:
 
@@ -43,3 +44,5 @@ jobs:
         run: python infra/tests/test_final_qa_evidence.py
       - name: Live validation harness safety
         run: python infra/tests/test_live_validation_harness.py
+      - name: Provision workflow safety
+        run: python infra/tests/test_provision_workflow.py
