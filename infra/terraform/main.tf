@@ -23,7 +23,7 @@ resource "aws_budgets_budget" "portfolio" {
   time_unit    = "MONTHLY"
 
   dynamic "notification" {
-    for_each = var.budget_alert_email == null ? toset([]) : local.budget_thresholds
+    for_each = nonsensitive(var.budget_alert_email == null) ? toset([]) : local.budget_thresholds
     content {
       comparison_operator        = "GREATER_THAN"
       threshold                  = tonumber(notification.value)
