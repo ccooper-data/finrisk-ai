@@ -23,7 +23,13 @@ jobs:
         with:
           terraform_version: "1.9.8"
       - name: Terraform format
-        run: terraform -chdir=infra/terraform fmt -check -recursive
+        run: |
+          terraform -chdir=infra/terraform fmt -recursive
+          git diff --exit-code -- infra/terraform || {
+            echo "::error::Terraform formatting changed files. Commit the formatter output shown below."
+            git diff -- infra/terraform
+            exit 1
+          }
       - name: Terraform init without backend
         run: terraform -chdir=infra/terraform init -backend=false
       - name: Terraform validate
@@ -46,3 +52,5 @@ jobs:
         run: python infra/tests/test_live_validation_harness.py
       - name: Provision workflow safety
         run: python infra/tests/test_provision_workflow.py
+      - name: Bootstrap least-privilege policy acceptance
+        run: python infra/tests/test_bootstrap_policy.py
