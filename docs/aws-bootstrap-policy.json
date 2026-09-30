@@ -327,6 +327,37 @@
         "cloudtrail:RemoveTags"
       ],
       "Resource": "arn:aws:cloudtrail:*:*:trail/finrisk-*"
+    },
+    {
+      "Sid": "ManageFinRiskTerraformState",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+        "s3:GetBucketVersioning"
+      ],
+      "Resource": "arn:aws:s3:::finrisk-tfstate-*"
+    },
+    {
+      "Sid": "ManageFinRiskTerraformStateObjects",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": "arn:aws:s3:::finrisk-tfstate-*/*"
+    },
+    {
+      "Sid": "ManageFinRiskTerraformLocks",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:DescribeTable",
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:DeleteItem"
+      ],
+      "Resource": "arn:aws:dynamodb:*:*:table/finrisk-terraform-locks"
     }
   ]
 }
