@@ -18,7 +18,18 @@ checks = {
         {"iam:CreateOpenIDConnectProvider", "iam:DeleteOpenIDConnectProvider"}
         & set().union(*(actions(s) for s in policy["Statement"]))
     ),
-    "IAM roles scoped to finrisk": statements["ManageFinRiskRoles"]["Resource"].endswith("role/finrisk-*"),
+    "Terraform IAM mutation excludes bootstrap role": set(statements["ManageFinRiskRoles"]["Resource"]) == {
+        "arn:aws:iam::*:role/finrisk-eks-cluster-*",
+        "arn:aws:iam::*:role/finrisk-eks-nodes-*",
+    },
+    "bootstrap self-modification explicitly denied": statements["DenyBootstrapRoleSelfModification"]["Effect"] == "Deny"
+        and statements["DenyBootstrapRoleSelfModification"]["Resource"].endswith("role/github-finrisk-deployer"),
+    "bootstrap deny covers trust and permissions": {
+        "iam:UpdateAssumeRolePolicy", "iam:AttachRolePolicy", "iam:DetachRolePolicy",
+        "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:DeleteRole",
+        "iam:PutRolePermissionsBoundary", "iam:DeleteRolePermissionsBoundary",
+        "iam:TagRole", "iam:UntagRole",
+    }.issubset(actions(statements["DenyBootstrapRoleSelfModification"])),
     "managed attachments constrained": "iam:PolicyARN" in statements["AttachOnlyApprovedManagedPolicies"]["Condition"]["ArnEquals"],
     "pass role service constrained": "iam:PassedToService" in statements["PassOnlyFinRiskRolesToCompute"]["Condition"]["StringEquals"],
     "S3 bucket scope": statements["ManageFinRiskBuckets"]["Resource"] == "arn:aws:s3:::finrisk-*",
