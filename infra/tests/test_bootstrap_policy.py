@@ -5,11 +5,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 policy = json.loads((ROOT / "docs" / "aws-bootstrap-policy.json").read_text())
 security = (ROOT / "infra" / "terraform" / "security.tf").read_text()
+audit = (ROOT / "infra" / "terraform" / "audit.tf").read_text()
 statements = {s["Sid"]: s for s in policy["Statement"]}
+
 
 def actions(statement):
     value = statement["Action"]
     return {value} if isinstance(value, str) else set(value)
+
 
 checks = {
     "Terraform does not create OIDC provider": 'resource "aws_iam_openid_connect_provider"' not in security,
@@ -30,18 +33,26 @@ checks = {
         "iam:PutRolePermissionsBoundary", "iam:DeleteRolePermissionsBoundary",
         "iam:TagRole", "iam:UntagRole",
     }.issubset(actions(statements["DenyBootstrapRoleSelfModification"])),
-    "managed attachments constrained": "iam:PolicyARN" in statements["AttachOnlyApprovedManagedPolicies"]["Condition"]["ArnEquals"],
-    "pass role service constrained": "iam:PassedToService" in statements["PassOnlyFinRiskRolesToCompute"]["Condition"]["StringEquals"],
-    "S3 bucket scope": statements["ManageFinRiskBuckets"]["Resource"] == "arn:aws:s3:::finrisk-*",
-    "S3 object scope": statements["ManageFinRiskBucketObjects"]["Resource"] == "arn:aws:s3:::finrisk-*/*",
+    "managed attachments constrained": "iam:PolicyARN"
+        in statements["AttachOnlyApprovedManagedPolicies"]["Condition"]["ArnEquals"],
+    "pass role service constrained": "iam:PassedToService"
+        in statements["PassOnlyFinRiskRolesToCompute"]["Condition"]["StringEquals"],
+    "S3 bucket scope covers Terraform prefixes": set(statements["ManageFinRiskBuckets"]["Resource"]) == {
+        "arn:aws:s3:::finrisk-ai-audit-*",
+        "arn:aws:s3:::finrisk-ai-governed-artifacts-*",
+    }
+        and 'bucket_prefix = "${var.project_name}-audit-"' in audit
+        and 'bucket_prefix = "${var.project_name}-governed-artifacts-"' in security,
+    "S3 object scope covers Terraform prefixes": set(statements["ManageFinRiskBucketObjects"]["Resource"]) == {
+        "arn:aws:s3:::finrisk-ai-audit-*/*",
+        "arn:aws:s3:::finrisk-ai-governed-artifacts-*/*",
+    },
     "CloudTrail scoped": statements["ManageFinRiskCloudTrail"]["Resource"].endswith("trail/finrisk-*"),
     "budget uses real action": actions(statements["ManageFinRiskBudget"]) == {"budgets:ModifyBudget"},
     "OIDC read only": "iam:GetOpenIDConnectProvider" in actions(statements["ReadAccountAndInfrastructure"]),
 }
 
-
 trust = json.loads((ROOT / "docs" / "aws-bootstrap-trust-policy.json").read_text())
-
 compact_policy = json.dumps(policy, separators=(",", ":"))
 policy_chars = len(compact_policy)
 trust_stmt = trust["Statement"][0]
@@ -54,8 +65,9 @@ checks.update({
     ),
     "trust audience pinned to STS": trust_conditions["token.actions.githubusercontent.com:aud"]
         == "sts.amazonaws.com",
-    "trust subject pinned to FinRisk main": trust_conditions["token.actions.githubusercontent.com:sub"]
-        == "repo:ccooper-data/finrisk-ai:ref:refs/heads/main",
+    "trust subject pinned to immutable FinRisk environment":
+        trust_conditions["token.actions.githubusercontent.com:sub"]
+        == "repo:ccooper-data@314428882/finrisk-ai@1384434300:environment:portfolio-validation",
 })
 print(f"INFO: compact inline policy size={policy_chars}/10240 characters")
 
