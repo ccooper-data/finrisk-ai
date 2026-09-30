@@ -78,8 +78,19 @@ jobs:
           test "$(jq -r '.conclusion' <<<"$run_json")" = "success"
           test "$(jq -r '.head_sha' <<<"$run_json")" = "$CURRENT_SHA"
           test "$(jq -r '.event' <<<"$run_json")" = "workflow_dispatch"
-          plan_action="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${PLAN_RUN_ID}/attempts/1/jobs" --jq '.jobs[0].steps[] | select(.name=="Create bounded validation plan") | .conclusion')"
+          attempt="$(jq -r '.run_attempt' <<<"$run_json")"
+          plan_action="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${PLAN_RUN_ID}/attempts/${attempt}/jobs" --jq '.jobs[0].steps[] | select(.name=="Create bounded validation plan") | .conclusion')"
           test "$plan_action" = "success"
+
+      - name: Download authoritative PLAN checksum artifact
+        if: inputs.action == 'apply-reviewed-plan'
+        uses: actions/download-artifact@v4
+        with:
+          name: bounded-aws-plan-evidence
+          path: reviewed-plan-evidence
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.plan_run_id }}
 
       - name: Create bounded validation plan
         if: inputs.action == 'plan'
@@ -116,7 +127,7 @@ jobs:
         if: inputs.action == 'apply-reviewed-plan'
         run: |
           aws s3 cp "s3://${{ vars.TF_STATE_BUCKET }}/plans/${{ inputs.plan_run_id }}/bounded-validation.tfplan" "$TF_DIR/bounded-validation.tfplan"
-          aws s3 cp "s3://${{ vars.TF_STATE_BUCKET }}/plans/${{ inputs.plan_run_id }}/bounded-validation.tfplan.sha256" "$TF_DIR/bounded-validation.tfplan.sha256"
+          cp reviewed-plan-evidence/bounded-validation.tfplan.sha256 "$TF_DIR/bounded-validation.tfplan.sha256"
           (cd "$TF_DIR" && sha256sum -c bounded-validation.tfplan.sha256)
 
       - name: Apply exact reviewed binary plan
