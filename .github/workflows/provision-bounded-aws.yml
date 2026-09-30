@@ -1,0 +1,96 @@
+name: Provision Bounded AWS Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Safety stage: plan creates no runtime resources; apply requires explicit selection"
+        required: true
+        default: "plan"
+        type: choice
+        options:
+          - plan
+          - apply
+      aws_region:
+        description: "AWS region"
+        required: true
+        default: "us-east-1"
+        type: string
+      budget_alert_email:
+        description: "Email for AWS Budget alerts"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: finrisk-bounded-aws-validation
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    environment: portfolio-validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Configure short-lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Initialize Terraform
+        run: terraform -chdir=infra/terraform init
+
+      - name: Validate Terraform
+        run: terraform -chdir=infra/terraform validate
+
+      - name: Create bounded validation plan
+        run: |
+          terraform -chdir=infra/terraform plan -out=bounded-validation.tfplan \
+            -var="aws_region=${{ inputs.aws_region }}" \
+            -var="budget_alert_email=${{ inputs.budget_alert_email }}" \
+            -var="monthly_budget_limit_usd=100" \
+            -var="enable_eks=true" \
+            -var="enable_nat_gateway=true" \
+            -var="enable_observability=true" \
+            -var="enable_audit_trail=true"
+          terraform -chdir=infra/terraform show -no-color bounded-validation.tfplan > bounded-validation-plan.txt
+
+      - name: Upload reviewed plan evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounded-aws-validation-plan
+          path: infra/terraform/bounded-validation-plan.txt
+          retention-days: 7
+
+      - name: Stop after plan
+        if: inputs.action == 'plan'
+        run: |
+          echo "PLAN ONLY: no billable runtime infrastructure was applied."
+
+      - name: Apply exact reviewed plan
+        if: inputs.action == 'apply'
+        run: terraform -chdir=infra/terraform apply -auto-approve bounded-validation.tfplan
+
+      - name: Record provisioned outputs
+        if: inputs.action == 'apply'
+        run: terraform -chdir=infra/terraform output -json > provisioned-outputs.json
+
+      - name: Upload provisioning evidence
+        if: inputs.action == 'apply'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounded-aws-provisioning-evidence
+          path: provisioned-outputs.json
+          retention-days: 7
