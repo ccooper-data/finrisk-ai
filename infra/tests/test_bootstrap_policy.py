@@ -22,8 +22,8 @@ checks = {
         & set().union(*(actions(s) for s in policy["Statement"]))
     ),
     "Terraform IAM mutation excludes bootstrap role": set(statements["ManageFinRiskRoles"]["Resource"]) == {
-        "arn:aws:iam::*:role/finrisk-eks-cluster-*",
-        "arn:aws:iam::*:role/finrisk-eks-nodes-*",
+        "arn:aws:iam::*:role/finrisk-ai-eks-cluster-*",
+        "arn:aws:iam::*:role/finrisk-ai-eks-nodes-*",
     },
     "bootstrap self-modification explicitly denied": statements["DenyBootstrapRoleSelfModification"]["Effect"] == "Deny"
         and statements["DenyBootstrapRoleSelfModification"]["Resource"].endswith("role/github-finrisk-deployer"),
@@ -33,6 +33,14 @@ checks = {
         "iam:PutRolePermissionsBoundary", "iam:DeleteRolePermissionsBoundary",
         "iam:TagRole", "iam:UntagRole",
     }.issubset(actions(statements["DenyBootstrapRoleSelfModification"])),
+    "create role boundary constrained": statements["CreateBoundedFinRiskRoles"]["Condition"]["StringEquals"]["iam:PermissionsBoundary"]
+        == "arn:aws:iam::780976819607:policy/finrisk-ai-eks-boundary",
+    "no role inline-policy escalation": "iam:PutRolePolicy" not in actions(statements["ManageFinRiskRoles"]),
+    "no role trust-policy escalation": "iam:UpdateAssumeRolePolicy" not in actions(statements["ManageFinRiskRoles"]),
+    "KMS alias scoped": statements["ManageFinRiskKMSAlias"]["Resource"]
+        == "arn:aws:kms:us-east-1:780976819607:alias/finrisk-ai-*",
+    "budget scoped": statements["ManageFinRiskBudget"]["Resource"]
+        == "arn:aws:budgets::780976819607:budget/finrisk-ai-*",
     "managed attachments constrained": "iam:PolicyARN"
         in statements["AttachOnlyApprovedManagedPolicies"]["Condition"]["ArnEquals"],
     "pass role service constrained": "iam:PassedToService"
