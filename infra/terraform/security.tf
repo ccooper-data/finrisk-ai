@@ -1,77 +1,10 @@
 data "aws_caller_identity" "current" {}
 
-resource "aws_iam_openid_connect_provider" "github" {
-  url = "https://token.actions.githubusercontent.com"
-
-  client_id_list = ["sts.amazonaws.com"]
-}
-
-data "aws_iam_policy_document" "github_deploy_assume" {
-  statement {
-    actions = ["sts:AssumeRoleWithWebIdentity"]
-
-    principals {
-      type        = "Federated"
-      identifiers = [aws_iam_openid_connect_provider.github.arn]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "token.actions.githubusercontent.com:aud"
-      values   = ["sts.amazonaws.com"]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository}:ref:${var.github_deploy_ref}"]
-    }
-  }
-}
-
-resource "aws_iam_role" "github_deploy" {
-  name_prefix        = "${var.project_name}-github-deploy-"
-  assume_role_policy = data.aws_iam_policy_document.github_deploy_assume.json
-
-  tags = {
-    Purpose = "Short-lived GitHub Actions deployment identity"
-  }
-}
-
-data "aws_iam_policy_document" "github_deploy" {
-  statement {
-    sid = "EcrAuthorization"
-    actions = [
-      "ecr:GetAuthorizationToken",
-    ]
-    resources = ["*"]
-  }
-
-  statement {
-    sid = "EcrImageDelivery"
-    actions = [
-      "ecr:BatchCheckLayerAvailability",
-      "ecr:CompleteLayerUpload",
-      "ecr:InitiateLayerUpload",
-      "ecr:PutImage",
-      "ecr:UploadLayerPart",
-    ]
-    resources = [aws_ecr_repository.inference.arn]
-  }
-
-  statement {
-    sid = "ReadClusterMetadata"
-    actions = [
-      "eks:DescribeCluster",
-    ]
-    resources = var.enable_eks ? [aws_eks_cluster.platform[0].arn] : []
-  }
-}
-
-resource "aws_iam_role_policy" "github_deploy" {
-  name_prefix = "${var.project_name}-deploy-"
-  role        = aws_iam_role.github_deploy.id
-  policy      = data.aws_iam_policy_document.github_deploy.json
+# The GitHub OIDC provider and bootstrap deployment role are account bootstrap
+# resources created outside this stack. This stack deliberately does not own,
+# mutate, or delete the identity that is running Terraform.
+data "aws_iam_openid_connect_provider" "github" {
+  arn = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/token.actions.githubusercontent.com"
 }
 
 resource "aws_kms_key" "artifacts" {
@@ -91,7 +24,6 @@ resource "aws_kms_alias" "artifacts" {
 
 resource "aws_s3_bucket" "artifacts" {
   bucket_prefix = "${var.project_name}-governed-artifacts-"
-
   force_destroy = true
 
   tags = {
@@ -101,7 +33,6 @@ resource "aws_s3_bucket" "artifacts" {
 
 resource "aws_s3_bucket_public_access_block" "artifacts" {
   bucket = aws_s3_bucket.artifacts.id
-
   block_public_acls       = true
   block_public_policy     = true
   ignore_public_acls      = true
@@ -122,7 +53,6 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "artifacts" {
 
 resource "aws_s3_bucket_versioning" "artifacts" {
   bucket = aws_s3_bucket.artifacts.id
-
   versioning_configuration {
     status = "Enabled"
   }
@@ -134,9 +64,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
   rule {
     id     = "expire-noncurrent-portfolio-evidence"
     status = "Enabled"
-
     filter {}
-
     noncurrent_version_expiration {
       noncurrent_days = 30
     }
