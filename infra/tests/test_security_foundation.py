@@ -7,12 +7,10 @@ audit = (ROOT / "audit.tf").read_text()
 variables = (ROOT / "variables.tf").read_text()
 
 checks = {
-    "GitHub uses OIDC": 'aws_iam_openid_connect_provider' in security,
-    "OIDC audience is STS": 'values   = ["sts.amazonaws.com"]' in security,
-    "OIDC subject bound to repo/ref": 'token.actions.githubusercontent.com:sub' in security
-        and 'repo:${var.github_repository}:ref:${var.github_deploy_ref}' in security,
-    "deploy role uses web identity": "sts:AssumeRoleWithWebIdentity" in security,
-    "ECR image permissions scoped": "resources = [aws_ecr_repository.inference.arn]" in security,
+    "GitHub OIDC is external data source": 'data "aws_iam_openid_connect_provider" "github"' in security,
+    "stack does not create OIDC provider": 'resource "aws_iam_openid_connect_provider"' not in security,
+    "stack does not create GitHub deploy role": 'resource "aws_iam_role" "github_deploy"' not in security,
+    "stack cannot attach GitHub deploy inline policy": 'aws_iam_role_policy" "github_deploy"' not in security,
     "KMS rotation enabled": "enable_key_rotation     = true" in security,
     "artifact bucket public access blocked": "block_public_policy     = true" in security
         and "restrict_public_buckets = true" in security,
