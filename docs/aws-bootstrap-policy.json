@@ -2,6 +2,23 @@
   "Version": "2012-10-17",
   "Statement": [
     {
+      "Sid": "DenyBootstrapRoleSelfModification",
+      "Effect": "Deny",
+      "Action": [
+        "iam:UpdateAssumeRolePolicy",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:DeleteRole",
+        "iam:PutRolePermissionsBoundary",
+        "iam:DeleteRolePermissionsBoundary",
+        "iam:TagRole",
+        "iam:UntagRole"
+      ],
+      "Resource": "arn:aws:iam::*:role/github-finrisk-deployer"
+    },
+    {
       "Sid": "ReadAccountAndInfrastructure",
       "Effect": "Allow",
       "Action": [
@@ -46,16 +63,37 @@
       "Sid": "ManageFinRiskNetwork",
       "Effect": "Allow",
       "Action": [
-        "ec2:CreateVpc","ec2:DeleteVpc","ec2:ModifyVpcAttribute",
-        "ec2:CreateSubnet","ec2:DeleteSubnet","ec2:ModifySubnetAttribute",
-        "ec2:CreateInternetGateway","ec2:DeleteInternetGateway","ec2:AttachInternetGateway","ec2:DetachInternetGateway",
-        "ec2:CreateRouteTable","ec2:DeleteRouteTable","ec2:AssociateRouteTable","ec2:DisassociateRouteTable",
-        "ec2:CreateRoute","ec2:DeleteRoute","ec2:AllocateAddress","ec2:ReleaseAddress",
-        "ec2:CreateNatGateway","ec2:DeleteNatGateway","ec2:CreateSecurityGroup","ec2:DeleteSecurityGroup",
-        "ec2:AuthorizeSecurityGroupIngress","ec2:AuthorizeSecurityGroupEgress",
-        "ec2:RevokeSecurityGroupIngress","ec2:RevokeSecurityGroupEgress",
-        "ec2:CreateVpcEndpoint","ec2:DeleteVpcEndpoints","ec2:ModifyVpcEndpoint",
-        "ec2:CreateTags","ec2:DeleteTags"
+        "ec2:CreateVpc",
+        "ec2:DeleteVpc",
+        "ec2:ModifyVpcAttribute",
+        "ec2:CreateSubnet",
+        "ec2:DeleteSubnet",
+        "ec2:ModifySubnetAttribute",
+        "ec2:CreateInternetGateway",
+        "ec2:DeleteInternetGateway",
+        "ec2:AttachInternetGateway",
+        "ec2:DetachInternetGateway",
+        "ec2:CreateRouteTable",
+        "ec2:DeleteRouteTable",
+        "ec2:AssociateRouteTable",
+        "ec2:DisassociateRouteTable",
+        "ec2:CreateRoute",
+        "ec2:DeleteRoute",
+        "ec2:AllocateAddress",
+        "ec2:ReleaseAddress",
+        "ec2:CreateNatGateway",
+        "ec2:DeleteNatGateway",
+        "ec2:CreateSecurityGroup",
+        "ec2:DeleteSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:CreateVpcEndpoint",
+        "ec2:DeleteVpcEndpoints",
+        "ec2:ModifyVpcEndpoint",
+        "ec2:CreateTags",
+        "ec2:DeleteTags"
       ],
       "Resource": "*",
       "Condition": {
@@ -68,9 +106,17 @@
       "Sid": "ManageFinRiskEKS",
       "Effect": "Allow",
       "Action": [
-        "eks:CreateCluster","eks:DeleteCluster","eks:TagResource","eks:UntagResource",
-        "eks:CreateNodegroup","eks:DeleteNodegroup","eks:UpdateNodegroupConfig","eks:UpdateNodegroupVersion",
-        "eks:DescribeUpdate","eks:UpdateClusterConfig","eks:UpdateClusterVersion"
+        "eks:CreateCluster",
+        "eks:DeleteCluster",
+        "eks:TagResource",
+        "eks:UntagResource",
+        "eks:CreateNodegroup",
+        "eks:DeleteNodegroup",
+        "eks:UpdateNodegroupConfig",
+        "eks:UpdateNodegroupVersion",
+        "eks:DescribeUpdate",
+        "eks:UpdateClusterConfig",
+        "eks:UpdateClusterVersion"
       ],
       "Resource": [
         "arn:aws:eks:*:*:cluster/finrisk-*",
@@ -81,10 +127,20 @@
       "Sid": "ManageFinRiskECR",
       "Effect": "Allow",
       "Action": [
-        "ecr:CreateRepository","ecr:DeleteRepository","ecr:PutLifecyclePolicy","ecr:DeleteLifecyclePolicy",
-        "ecr:PutImageScanningConfiguration","ecr:PutImageTagMutability","ecr:TagResource","ecr:UntagResource",
-        "ecr:BatchCheckLayerAvailability","ecr:BatchGetImage","ecr:CompleteLayerUpload",
-        "ecr:InitiateLayerUpload","ecr:PutImage","ecr:UploadLayerPart"
+        "ecr:CreateRepository",
+        "ecr:DeleteRepository",
+        "ecr:PutLifecyclePolicy",
+        "ecr:DeleteLifecyclePolicy",
+        "ecr:PutImageScanningConfiguration",
+        "ecr:PutImageTagMutability",
+        "ecr:TagResource",
+        "ecr:UntagResource",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchGetImage",
+        "ecr:CompleteLayerUpload",
+        "ecr:InitiateLayerUpload",
+        "ecr:PutImage",
+        "ecr:UploadLayerPart"
       ],
       "Resource": "arn:aws:ecr:*:*:repository/finrisk-*"
     },
@@ -92,16 +148,30 @@
       "Sid": "ManageFinRiskRoles",
       "Effect": "Allow",
       "Action": [
-        "iam:CreateRole","iam:DeleteRole","iam:TagRole","iam:UntagRole",
-        "iam:UpdateAssumeRolePolicy","iam:PutRolePolicy","iam:DeleteRolePolicy"
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy"
       ],
-      "Resource": "arn:aws:iam::*:role/finrisk-*"
+      "Resource": [
+        "arn:aws:iam::*:role/finrisk-eks-cluster-*",
+        "arn:aws:iam::*:role/finrisk-eks-nodes-*"
+      ]
     },
     {
       "Sid": "AttachOnlyApprovedManagedPolicies",
       "Effect": "Allow",
-      "Action": ["iam:AttachRolePolicy","iam:DetachRolePolicy"],
-      "Resource": "arn:aws:iam::*:role/finrisk-*",
+      "Action": [
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy"
+      ],
+      "Resource": [
+        "arn:aws:iam::*:role/finrisk-eks-cluster-*",
+        "arn:aws:iam::*:role/finrisk-eks-nodes-*"
+      ],
       "Condition": {
         "ArnEquals": {
           "iam:PolicyARN": [
@@ -117,10 +187,16 @@
       "Sid": "PassOnlyFinRiskRolesToCompute",
       "Effect": "Allow",
       "Action": "iam:PassRole",
-      "Resource": "arn:aws:iam::*:role/finrisk-*",
+      "Resource": [
+        "arn:aws:iam::*:role/finrisk-eks-cluster-*",
+        "arn:aws:iam::*:role/finrisk-eks-nodes-*"
+      ],
       "Condition": {
         "StringEquals": {
-          "iam:PassedToService": ["eks.amazonaws.com","ec2.amazonaws.com"]
+          "iam:PassedToService": [
+            "eks.amazonaws.com",
+            "ec2.amazonaws.com"
+          ]
         }
       }
     },
@@ -138,26 +214,62 @@
     {
       "Sid": "ManageFinRiskBuckets",
       "Effect": "Allow",
-      "Action": ["s3:CreateBucket","s3:DeleteBucket","s3:ListBucket","s3:GetBucketLocation","s3:GetBucketAcl",
-        "s3:GetBucketCORS","s3:GetBucketWebsite","s3:GetAccelerateConfiguration","s3:GetBucketRequestPayment",
-        "s3:GetBucketLogging","s3:GetReplicationConfiguration","s3:GetBucketObjectLockConfiguration",
-        "s3:GetBucketOwnershipControls","s3:GetBucketPolicy","s3:PutBucketPolicy","s3:DeleteBucketPolicy",
-        "s3:GetBucketVersioning","s3:PutBucketVersioning","s3:GetEncryptionConfiguration","s3:PutEncryptionConfiguration",
-        "s3:GetLifecycleConfiguration","s3:PutLifecycleConfiguration","s3:GetBucketPublicAccessBlock",
-        "s3:PutBucketPublicAccessBlock","s3:GetBucketTagging","s3:PutBucketTagging","s3:ListBucketVersions"],
+      "Action": [
+        "s3:CreateBucket",
+        "s3:DeleteBucket",
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+        "s3:GetBucketAcl",
+        "s3:GetBucketCORS",
+        "s3:GetBucketWebsite",
+        "s3:GetAccelerateConfiguration",
+        "s3:GetBucketRequestPayment",
+        "s3:GetBucketLogging",
+        "s3:GetReplicationConfiguration",
+        "s3:GetBucketObjectLockConfiguration",
+        "s3:GetBucketOwnershipControls",
+        "s3:GetBucketPolicy",
+        "s3:PutBucketPolicy",
+        "s3:DeleteBucketPolicy",
+        "s3:GetBucketVersioning",
+        "s3:PutBucketVersioning",
+        "s3:GetEncryptionConfiguration",
+        "s3:PutEncryptionConfiguration",
+        "s3:GetLifecycleConfiguration",
+        "s3:PutLifecycleConfiguration",
+        "s3:GetBucketPublicAccessBlock",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:GetBucketTagging",
+        "s3:PutBucketTagging",
+        "s3:ListBucketVersions"
+      ],
       "Resource": "arn:aws:s3:::finrisk-*"
     },
     {
       "Sid": "ManageFinRiskBucketObjects",
       "Effect": "Allow",
-      "Action": ["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:DeleteObjectVersion"],
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:DeleteObjectVersion"
+      ],
       "Resource": "arn:aws:s3:::finrisk-*/*"
     },
     {
       "Sid": "ManageFinRiskKMS",
       "Effect": "Allow",
-      "Action": ["kms:CreateAlias","kms:DeleteAlias","kms:EnableKeyRotation","kms:ScheduleKeyDeletion",
-        "kms:CancelKeyDeletion","kms:TagResource","kms:UntagResource","kms:PutKeyPolicy","kms:CreateGrant"],
+      "Action": [
+        "kms:CreateAlias",
+        "kms:DeleteAlias",
+        "kms:EnableKeyRotation",
+        "kms:ScheduleKeyDeletion",
+        "kms:CancelKeyDeletion",
+        "kms:TagResource",
+        "kms:UntagResource",
+        "kms:PutKeyPolicy",
+        "kms:CreateGrant"
+      ],
       "Resource": "arn:aws:kms:*:*:key/*",
       "Condition": {
         "StringEqualsIfExists": {
@@ -186,8 +298,15 @@
       "Sid": "ManageFinRiskObservability",
       "Effect": "Allow",
       "Action": [
-        "logs:CreateLogGroup","logs:DeleteLogGroup","logs:PutRetentionPolicy","logs:TagResource","logs:UntagResource",
-        "cloudwatch:PutMetricAlarm","cloudwatch:DeleteAlarms","cloudwatch:TagResource","cloudwatch:UntagResource"
+        "logs:CreateLogGroup",
+        "logs:DeleteLogGroup",
+        "logs:PutRetentionPolicy",
+        "logs:TagResource",
+        "logs:UntagResource",
+        "cloudwatch:PutMetricAlarm",
+        "cloudwatch:DeleteAlarms",
+        "cloudwatch:TagResource",
+        "cloudwatch:UntagResource"
       ],
       "Resource": [
         "arn:aws:logs:*:*:log-group:/finrisk/*",
@@ -198,8 +317,14 @@
       "Sid": "ManageFinRiskCloudTrail",
       "Effect": "Allow",
       "Action": [
-        "cloudtrail:CreateTrail","cloudtrail:DeleteTrail","cloudtrail:StartLogging","cloudtrail:StopLogging",
-        "cloudtrail:UpdateTrail","cloudtrail:PutEventSelectors","cloudtrail:AddTags","cloudtrail:RemoveTags"
+        "cloudtrail:CreateTrail",
+        "cloudtrail:DeleteTrail",
+        "cloudtrail:StartLogging",
+        "cloudtrail:StopLogging",
+        "cloudtrail:UpdateTrail",
+        "cloudtrail:PutEventSelectors",
+        "cloudtrail:AddTags",
+        "cloudtrail:RemoveTags"
       ],
       "Resource": "arn:aws:cloudtrail:*:*:trail/finrisk-*"
     }
