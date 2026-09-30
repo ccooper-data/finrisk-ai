@@ -27,6 +27,10 @@ resource "aws_eks_cluster" "platform" {
   role_arn = aws_iam_role.eks_cluster[0].arn
   version  = var.eks_cluster_version
 
+  upgrade_policy {
+    support_type = "STANDARD"
+  }
+
   vpc_config {
     subnet_ids              = aws_subnet.private[*].id
     endpoint_private_access = true
