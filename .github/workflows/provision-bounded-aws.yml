@@ -105,7 +105,7 @@ jobs:
             -var="enable_observability=true" \
             -var="enable_audit_trail=true"
           terraform -chdir="$TF_DIR" show -no-color bounded-validation.tfplan > "$TF_DIR/bounded-validation-plan.txt"
-          sha256sum "$TF_DIR/bounded-validation.tfplan" > "$TF_DIR/bounded-validation.tfplan.sha256"
+          (cd "$TF_DIR" && sha256sum bounded-validation.tfplan > bounded-validation.tfplan.sha256)
 
       - name: Store private binary plan in state bucket
         if: inputs.action == 'plan'
