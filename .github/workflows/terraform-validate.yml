@@ -34,6 +34,15 @@ jobs:
         run: terraform -chdir=infra/terraform init -backend=false
       - name: Terraform validate
         run: terraform -chdir=infra/terraform validate
+      - name: Validate GitHub workflow YAML
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+          for path in Path(".github/workflows").glob("*.yml"):
+              yaml.safe_load(path.read_text())
+              print(f"PASS: {path}")
+          PY
       - name: Compile infrastructure acceptance tests
         run: python -m compileall -q infra/tests
       - name: Network architecture acceptance
