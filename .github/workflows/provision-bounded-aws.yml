@@ -4,33 +4,39 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: "Safety stage: plan creates no runtime resources; apply requires explicit selection"
+        description: "Select plan, apply-reviewed-plan, or destroy"
         required: true
         default: "plan"
         type: choice
         options:
           - plan
-          - apply
+          - apply-reviewed-plan
+          - destroy
+      plan_run_id:
+        description: "Successful PLAN workflow run ID; required only for apply-reviewed-plan"
+        required: false
+        type: string
       aws_region:
         description: "AWS region"
         required: true
         default: "us-east-1"
         type: string
-      budget_alert_email:
-        description: "Email for AWS Budget alerts"
-        required: true
-        type: string
 
 permissions:
   contents: read
   id-token: write
+  actions: read
 
 concurrency:
   group: finrisk-bounded-aws-validation
   cancel-in-progress: false
 
+env:
+  TF_DIR: infra/terraform
+  TF_STATE_KEY: finrisk-ai/portfolio/terraform.tfstate
+
 jobs:
-  provision:
+  execute:
     environment: portfolio-validation
     runs-on: ubuntu-latest
     steps:
@@ -49,48 +55,95 @@ jobs:
       - name: Verify AWS identity
         run: aws sts get-caller-identity
 
-      - name: Initialize Terraform
-        run: terraform -chdir=infra/terraform init
+      - name: Initialize persistent Terraform state
+        run: |
+          terraform -chdir="$TF_DIR" init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=$TF_STATE_KEY" \
+            -backend-config="region=${{ inputs.aws_region }}" \
+            -backend-config="dynamodb_table=${{ vars.TF_LOCK_TABLE }}" \
+            -backend-config="encrypt=true"
 
       - name: Validate Terraform
-        run: terraform -chdir=infra/terraform validate
+        run: terraform -chdir="$TF_DIR" validate
+
+      - name: Validate apply request
+        if: inputs.action == 'apply-reviewed-plan'
+        env:
+          PLAN_RUN_ID: ${{ inputs.plan_run_id }}
+        run: |
+          test -n "$PLAN_RUN_ID"
+          case "$PLAN_RUN_ID" in (*[!0-9]*|"") echo "plan_run_id must be numeric"; exit 1;; esac
 
       - name: Create bounded validation plan
+        if: inputs.action == 'plan'
+        env:
+          TF_VAR_budget_alert_email: ${{ secrets.BUDGET_ALERT_EMAIL }}
         run: |
-          terraform -chdir=infra/terraform plan -out=bounded-validation.tfplan \
+          terraform -chdir="$TF_DIR" plan -out=bounded-validation.tfplan \
             -var="aws_region=${{ inputs.aws_region }}" \
-            -var="budget_alert_email=${{ inputs.budget_alert_email }}" \
             -var="monthly_budget_limit_usd=100" \
             -var="enable_eks=true" \
             -var="enable_nat_gateway=true" \
             -var="enable_observability=true" \
             -var="enable_audit_trail=true"
-          terraform -chdir=infra/terraform show -no-color bounded-validation.tfplan > bounded-validation-plan.txt
+          terraform -chdir="$TF_DIR" show -no-color bounded-validation.tfplan > "$TF_DIR/bounded-validation-plan.txt"
 
-      - name: Upload reviewed plan evidence
+      - name: Upload reviewed binary plan
+        if: inputs.action == 'plan'
         uses: actions/upload-artifact@v4
         with:
-          name: bounded-aws-validation-plan
-          path: infra/terraform/bounded-validation-plan.txt
+          name: bounded-aws-reviewed-plan
+          path: |
+            infra/terraform/bounded-validation.tfplan
+            infra/terraform/bounded-validation-plan.txt
           retention-days: 7
 
-      - name: Stop after plan
-        if: inputs.action == 'plan'
-        run: |
-          echo "PLAN ONLY: no billable runtime infrastructure was applied."
+      - name: Download exact reviewed plan
+        if: inputs.action == 'apply-reviewed-plan'
+        uses: actions/download-artifact@v4
+        with:
+          name: bounded-aws-reviewed-plan
+          path: infra/terraform
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.plan_run_id }}
 
-      - name: Apply exact reviewed plan
-        if: inputs.action == 'apply'
-        run: terraform -chdir=infra/terraform apply -auto-approve bounded-validation.tfplan
+      - name: Apply exact reviewed binary plan
+        if: inputs.action == 'apply-reviewed-plan'
+        run: terraform -chdir="$TF_DIR" apply -auto-approve bounded-validation.tfplan
 
       - name: Record provisioned outputs
-        if: inputs.action == 'apply'
-        run: terraform -chdir=infra/terraform output -json > provisioned-outputs.json
+        if: inputs.action == 'apply-reviewed-plan'
+        run: terraform -chdir="$TF_DIR" output -json > provisioned-outputs.json
 
       - name: Upload provisioning evidence
-        if: inputs.action == 'apply'
+        if: inputs.action == 'apply-reviewed-plan'
         uses: actions/upload-artifact@v4
         with:
           name: bounded-aws-provisioning-evidence
           path: provisioned-outputs.json
           retention-days: 7
+
+      - name: Destroy bounded validation environment
+        if: inputs.action == 'destroy'
+        env:
+          TF_VAR_budget_alert_email: ${{ secrets.BUDGET_ALERT_EMAIL }}
+        run: |
+          terraform -chdir="$TF_DIR" destroy -auto-approve \
+            -var="aws_region=${{ inputs.aws_region }}" \
+            -var="monthly_budget_limit_usd=100" \
+            -var="enable_eks=true" \
+            -var="enable_nat_gateway=true" \
+            -var="enable_observability=true" \
+            -var="enable_audit_trail=true"
+
+      - name: Verify destroy state
+        if: inputs.action == 'destroy'
+        run: |
+          remaining="$(terraform -chdir="$TF_DIR" state list)"
+          test -z "$remaining" || {
+            echo "::error::Terraform state still contains resources after destroy"
+            printf '%s\n' "$remaining"
+            exit 1
+          }
