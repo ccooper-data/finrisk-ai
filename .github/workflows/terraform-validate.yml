@@ -46,3 +46,5 @@ jobs:
         run: python infra/tests/test_live_validation_harness.py
       - name: Provision workflow safety
         run: python infra/tests/test_provision_workflow.py
+      - name: Bootstrap least-privilege policy acceptance
+        run: python infra/tests/test_bootstrap_policy.py
