@@ -30,6 +30,7 @@ env:
   AWS_REGION: us-east-1
   TF_DIR: infra/terraform
   TF_STATE_KEY: finrisk-ai/portfolio/terraform.tfstate
+  VALIDATION_MAX_HOURS: "6"
 
 jobs:
   execute:
@@ -134,6 +135,13 @@ jobs:
         if: inputs.action == 'apply-reviewed-plan'
         run: terraform -chdir="$TF_DIR" apply -auto-approve bounded-validation.tfplan
 
+      - name: Record teardown deadline
+        if: inputs.action == 'apply-reviewed-plan'
+        run: |
+          deadline="$(date -u -d "+${VALIDATION_MAX_HOURS} hours" +%Y-%m-%dT%H:%M:%SZ)"
+          printf '%s\n' "$deadline" > teardown-deadline.txt
+          echo "::notice::Bounded validation teardown deadline: $deadline"
+
       - name: Record provisioned outputs
         if: inputs.action == 'apply-reviewed-plan'
         run: terraform -chdir="$TF_DIR" output -json > provisioned-outputs.json
@@ -143,7 +151,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bounded-aws-provisioning-evidence
-          path: provisioned-outputs.json
+          path: |
+            provisioned-outputs.json
+            teardown-deadline.txt
           retention-days: 7
 
       - name: Destroy bounded validation environment
