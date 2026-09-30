@@ -2,6 +2,23 @@
   "Version": "2012-10-17",
   "Statement": [
     {
+      "Sid": "DenyTerraformStateBucketMutation",
+      "Effect": "Deny",
+      "Action": [
+        "s3:DeleteBucket",
+        "s3:PutBucketPolicy",
+        "s3:DeleteBucketPolicy",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:PutBucketVersioning",
+        "s3:PutLifecycleConfiguration",
+        "s3:DeleteObjectVersion"
+      ],
+      "Resource": [
+        "arn:aws:s3:::finrisk-tfstate-*",
+        "arn:aws:s3:::finrisk-tfstate-*/*"
+      ]
+    },
+    {
       "Sid": "DenyBootstrapRoleSelfModification",
       "Effect": "Deny",
       "Action": [
@@ -243,7 +260,10 @@
         "s3:PutBucketTagging",
         "s3:ListBucketVersions"
       ],
-      "Resource": "arn:aws:s3:::finrisk-*"
+      "Resource": [
+        "arn:aws:s3:::finrisk-audit-*",
+        "arn:aws:s3:::finrisk-ai-governed-artifacts-*"
+      ]
     },
     {
       "Sid": "ManageFinRiskBucketObjects",
@@ -254,7 +274,10 @@
         "s3:DeleteObject",
         "s3:DeleteObjectVersion"
       ],
-      "Resource": "arn:aws:s3:::finrisk-*/*"
+      "Resource": [
+        "arn:aws:s3:::finrisk-audit-*/*",
+        "arn:aws:s3:::finrisk-ai-governed-artifacts-*/*"
+      ]
     },
     {
       "Sid": "ManageFinRiskKMS",
