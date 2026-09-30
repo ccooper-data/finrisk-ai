@@ -39,6 +39,26 @@ checks = {
     "OIDC read only": "iam:GetOpenIDConnectProvider" in actions(statements["ReadAccountAndInfrastructure"]),
 }
 
+
+trust = json.loads((ROOT / "docs" / "aws-bootstrap-trust-policy.json").read_text())
+
+compact_policy = json.dumps(policy, separators=(",", ":"))
+policy_chars = len(compact_policy)
+trust_stmt = trust["Statement"][0]
+trust_conditions = trust_stmt["Condition"]["StringEquals"]
+
+checks.update({
+    "inline role policy under AWS 10240-char limit": policy_chars <= 10240,
+    "trust uses GitHub OIDC provider": trust_stmt["Principal"]["Federated"].endswith(
+        ":oidc-provider/token.actions.githubusercontent.com"
+    ),
+    "trust audience pinned to STS": trust_conditions["token.actions.githubusercontent.com:aud"]
+        == "sts.amazonaws.com",
+    "trust subject pinned to FinRisk main": trust_conditions["token.actions.githubusercontent.com:sub"]
+        == "repo:ccooper-data/finrisk-ai:ref:refs/heads/main",
+})
+print(f"INFO: compact inline policy size={policy_chars}/10240 characters")
+
 failed = [name for name, ok in checks.items() if not ok]
 for name, ok in checks.items():
     print(f"{'PASS' if ok else 'FAIL'}: {name}")
