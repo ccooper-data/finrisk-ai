@@ -65,6 +65,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
     id     = "expire-noncurrent-portfolio-evidence"
     status = "Enabled"
     filter {}
+
     noncurrent_version_expiration {
       noncurrent_days = 30
     }
