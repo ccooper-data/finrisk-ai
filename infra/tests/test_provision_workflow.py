@@ -27,7 +27,7 @@ checks = {
         ".github/workflows/provision-bounded-aws.yml", "head_branch", "conclusion", "head_sha", "CURRENT_SHA"
     ]),
     "apply retrieves private plan": "/plans/${{ inputs.plan_run_id }}/bounded-validation.tfplan" in workflow,
-    "plan checksum verified": "sha256sum -c bounded-validation.tfplan.sha256" in workflow,
+    "checksum comes from PLAN GitHub artifact": "Download authoritative PLAN checksum artifact" in workflow\n        and "reviewed-plan-evidence/bounded-validation.tfplan.sha256" in workflow,\n    "plan checksum verified": "sha256sum -c bounded-validation.tfplan.sha256" in workflow,\n    "latest source-run attempt checked": ".run_attempt" in workflow and "/attempts/\${attempt}/jobs" in workflow,
     "apply exact binary only": "apply -auto-approve bounded-validation.tfplan" in workflow,
     "destroy action exists": "inputs.action == 'destroy'" in workflow and "destroy -auto-approve" in workflow,
     "destroy verifies empty state": "state list" in workflow,
