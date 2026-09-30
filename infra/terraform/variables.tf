@@ -28,10 +28,11 @@ variable "monthly_budget_limit_usd" {
 }
 
 variable "budget_alert_email" {
-  description = "Optional email for AWS Budget notifications. Leave null until an address is intentionally configured."
+  description = "Optional email for AWS Budget notifications. Supply through protected runtime configuration."
   type        = string
   default     = null
   nullable    = true
+  sensitive   = true
 }
 
 variable "vpc_cidr" {
