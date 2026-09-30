@@ -261,7 +261,7 @@
         "s3:ListBucketVersions"
       ],
       "Resource": [
-        "arn:aws:s3:::finrisk-audit-*",
+        "arn:aws:s3:::finrisk-ai-audit-*",
         "arn:aws:s3:::finrisk-ai-governed-artifacts-*"
       ]
     },
@@ -275,7 +275,7 @@
         "s3:DeleteObjectVersion"
       ],
       "Resource": [
-        "arn:aws:s3:::finrisk-audit-*/*",
+        "arn:aws:s3:::finrisk-ai-audit-*/*",
         "arn:aws:s3:::finrisk-ai-governed-artifacts-*/*"
       ]
     },
