@@ -56,7 +56,8 @@ checks = {
         "arn:aws:s3:::finrisk-ai-governed-artifacts-*/*",
     },
     "CloudTrail scoped": statements["ManageFinRiskCloudTrail"]["Resource"].endswith("trail/finrisk-*"),
-    "budget uses scoped lifecycle and tag actions": {"budgets:ModifyBudget", "budgets:TagResource", "budgets:UntagResource", "budgets:ListTagsForResource"}\n        == actions(statements["ManageFinRiskBudget"]),
+    "budget uses scoped lifecycle and tag actions": {"budgets:ModifyBudget", "budgets:TagResource", "budgets:UntagResource", "budgets:ListTagsForResource"}
+        == actions(statements["ManageFinRiskBudget"]),
     "OIDC read only": "iam:GetOpenIDConnectProvider" in actions(statements["ReadAccountAndInfrastructure"]),
 }
 
