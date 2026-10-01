@@ -16,7 +16,7 @@ locals {
 }
 
 resource "aws_budgets_budget" "portfolio" {
-  name         = "${var.project_name}-${var.environment}-hard-ceiling"
+  name         = "${var.project_name}-${var.environment}-validation-alerts"
   budget_type  = "COST"
   limit_amount = tostring(var.monthly_budget_limit_usd)
   limit_unit   = "USD"
@@ -29,6 +29,17 @@ resource "aws_budgets_budget" "portfolio" {
       threshold                  = tonumber(notification.value)
       threshold_type             = "ABSOLUTE_VALUE"
       notification_type          = "ACTUAL"
+      subscriber_email_addresses = [var.budget_alert_email]
+    }
+  }
+
+  dynamic "notification" {
+    for_each = nonsensitive(var.budget_alert_email == null) ? toset([]) : toset(["25", "50", "75", "90"])
+    content {
+      comparison_operator        = "GREATER_THAN"
+      threshold                  = tonumber(notification.value)
+      threshold_type             = "ABSOLUTE_VALUE"
+      notification_type          = "FORECASTED"
       subscriber_email_addresses = [var.budget_alert_email]
     }
   }

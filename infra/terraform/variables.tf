@@ -67,7 +67,7 @@ variable "enable_eks" {
 variable "eks_cluster_version" {
   description = "Pinned Kubernetes minor version for the portfolio EKS cluster."
   type        = string
-  default     = "1.33"
+  default     = "1.35"
 }
 
 variable "eks_node_instance_types" {

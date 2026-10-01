@@ -10,9 +10,10 @@ data "aws_iam_policy_document" "eks_cluster_assume" {
 }
 
 resource "aws_iam_role" "eks_cluster" {
-  count              = var.enable_eks ? 1 : 0
-  name_prefix        = "${var.project_name}-eks-cluster-"
-  assume_role_policy = data.aws_iam_policy_document.eks_cluster_assume.json
+  count                = var.enable_eks ? 1 : 0
+  name_prefix          = "${var.project_name}-eks-cluster-"
+  assume_role_policy   = data.aws_iam_policy_document.eks_cluster_assume.json
+  permissions_boundary = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:policy/finrisk-ai-eks-boundary"
 }
 
 resource "aws_iam_role_policy_attachment" "eks_cluster" {
@@ -26,6 +27,10 @@ resource "aws_eks_cluster" "platform" {
   name     = "${var.project_name}-${var.environment}"
   role_arn = aws_iam_role.eks_cluster[0].arn
   version  = var.eks_cluster_version
+
+  upgrade_policy {
+    support_type = "STANDARD"
+  }
 
   vpc_config {
     subnet_ids              = aws_subnet.private[*].id
@@ -53,9 +58,10 @@ data "aws_iam_policy_document" "eks_nodes_assume" {
 }
 
 resource "aws_iam_role" "eks_nodes" {
-  count              = var.enable_eks ? 1 : 0
-  name_prefix        = "${var.project_name}-eks-nodes-"
-  assume_role_policy = data.aws_iam_policy_document.eks_nodes_assume.json
+  count                = var.enable_eks ? 1 : 0
+  name_prefix          = "${var.project_name}-eks-nodes-"
+  assume_role_policy   = data.aws_iam_policy_document.eks_nodes_assume.json
+  permissions_boundary = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:policy/finrisk-ai-eks-boundary"
 }
 
 locals {
