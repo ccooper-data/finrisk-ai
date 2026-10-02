@@ -191,20 +191,32 @@
       ]
     },
     {
-      "Sid": "AttachOnlyApprovedManagedPolicies",
+      "Sid": "AttachApprovedClusterPolicy",
       "Effect": "Allow",
       "Action": [
         "iam:AttachRolePolicy",
         "iam:DetachRolePolicy"
       ],
-      "Resource": [
-        "arn:aws:iam::*:role/finrisk-ai-eks-cluster-*",
-        "arn:aws:iam::*:role/finrisk-ai-eks-nodes-*"
-      ],
+      "Resource": "arn:aws:iam::*:role/finrisk-ai-eks-cluster-*",
       "Condition": {
         "ArnEquals": {
           "iam:PolicyARN": [
-            "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy",
+            "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "AttachApprovedNodePolicies",
+      "Effect": "Allow",
+      "Action": [
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::*:role/finrisk-ai-eks-nodes-*",
+      "Condition": {
+        "ArnEquals": {
+          "iam:PolicyARN": [
             "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy",
             "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy",
             "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPullOnly"
@@ -305,11 +317,9 @@
         "kms:ScheduleKeyDeletion",
         "kms:CancelKeyDeletion",
         "kms:TagResource",
-        "kms:UntagResource",
-        "kms:PutKeyPolicy",
-        "kms:CreateGrant"
+        "kms:UntagResource"
       ],
-      "Resource": "arn:aws:kms:*:*:key/*",
+      "Resource": "arn:aws:kms:us-east-1:780976819607:key/*",
       "Condition": {
         "StringEqualsIfExists": {
           "aws:ResourceTag/Project": "FinRisk-AI"
@@ -412,6 +422,15 @@
         "kms:DeleteAlias"
       ],
       "Resource": "arn:aws:kms:us-east-1:780976819607:alias/finrisk-ai-*"
+    },
+    {
+      "Sid": "AuthorizeFinRiskKMSAliasOnKeys",
+      "Effect": "Allow",
+      "Action": [
+        "kms:CreateAlias",
+        "kms:DeleteAlias"
+      ],
+      "Resource": "arn:aws:kms:us-east-1:780976819607:key/*"
     }
   ]
 }
