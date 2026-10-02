@@ -21,28 +21,6 @@ resource "aws_budgets_budget" "portfolio" {
   limit_amount = tostring(var.monthly_budget_limit_usd)
   limit_unit   = "USD"
   time_unit    = "MONTHLY"
-
-  dynamic "notification" {
-    for_each = nonsensitive(var.budget_alert_email == null) ? toset([]) : local.budget_thresholds
-    content {
-      comparison_operator        = "GREATER_THAN"
-      threshold                  = tonumber(notification.value)
-      threshold_type             = "ABSOLUTE_VALUE"
-      notification_type          = "ACTUAL"
-      subscriber_email_addresses = [var.budget_alert_email]
-    }
-  }
-
-  dynamic "notification" {
-    for_each = nonsensitive(var.budget_alert_email == null) ? toset([]) : toset(["25", "50", "75", "90"])
-    content {
-      comparison_operator        = "GREATER_THAN"
-      threshold                  = tonumber(notification.value)
-      threshold_type             = "ABSOLUTE_VALUE"
-      notification_type          = "FORECASTED"
-      subscriber_email_addresses = [var.budget_alert_email]
-    }
-  }
 }
 
 check "portfolio_budget_ceiling" {
