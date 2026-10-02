@@ -3,8 +3,9 @@
 
 Models what the rollback logic depends on: a Deployment created with the default of one
 replica when the manifest sets none, server-side apply that leaves replicas alone, numbered
-revisions, rollout undo, delete, and images that never become ready (FAKE_BAD_IMAGES).
-FAKE_FAIL_REVISION_GET=1 makes the revision lookup fail like a transient API error.
+revisions, rollout undo, delete (NotFound unless --ignore-not-found), and images that never
+become ready (FAKE_BAD_IMAGES). FAKE_FAIL_REVISION_GET=1 makes the revision lookup fail like a
+transient API error; FAKE_FAIL_APPLY=1 does the same to the real apply, before it creates anything.
 """
 import json
 import os
@@ -37,6 +38,9 @@ if "serviceaccount" in args:
 if "apply" in args:
     if "--dry-run=server" in args:
         done(0)
+    if os.environ.get("FAKE_FAIL_APPLY") == "1":
+        print("error: the server is currently unable to handle the request", file=sys.stderr)
+        done(1)
     image = re.search(r"image: (\S+)", open(args[args.index("-f") + 1]).read()).group(1)
     if dep is None:
         state["deployment"] = {"replicas": 1, "image": image, "revision": 1, "history": {"1": image}}
@@ -72,6 +76,9 @@ if "rollout" in args and "undo" in args:
         dep.update(image=image, revision=revision)
     done(0)
 if "delete" in args and "deployment" in args:
+    if dep is None and "--ignore-not-found" not in args:
+        print("Error from server (NotFound): deployments.apps not found", file=sys.stderr)
+        done(1)
     state["deployment"] = None
     done(0)
 if "scale" in args:

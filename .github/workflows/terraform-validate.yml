@@ -90,6 +90,8 @@ jobs:
         run: python infra/tests/test_observability_foundation.py
       - name: Delivery and rollback acceptance
         run: python infra/tests/test_delivery_recovery.py
+      - name: CodeBuild runner script runtime acceptance
+        run: python infra/tests/test_run_codebuild_runtime.py
       - name: Final QA evidence acceptance
         run: python infra/tests/test_final_qa_evidence.py
       - name: Live validation harness safety

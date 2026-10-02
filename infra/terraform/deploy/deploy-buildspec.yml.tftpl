@@ -107,9 +107,10 @@ phases:
           else
             # First deploy: there is no earlier revision to return to. Delete rather than scale
             # to zero: the HPA never scales up from zero and the manifest sets no replicas, so a
-            # zero-replica Deployment would stay at zero through every later apply.
+            # zero-replica Deployment would stay at zero through every later apply. NotFound means
+            # the apply failed before creating it, so there is nothing to remove.
             echo "First deploy failed; deleting $APP"
-            "$K" -n "$NS" delete deployment "$APP" --wait=true || return 1
+            "$K" -n "$NS" delete deployment "$APP" --ignore-not-found --wait=true || return 1
           fi
         }
 

@@ -83,6 +83,11 @@ code, out, dep = deploy(NEXT, state, FAKE_BAD_IMAGES=BAD)
 checks["failed first deploy is removed, so the next deploy is healthy"] = first_removed and code == 0 \
     and dep["image"] == NEXT and dep["replicas"] >= 1
 
+# The dry run passes but the real apply fails before the Deployment exists: nothing to remove.
+code, out, dep = deploy(GOOD, fresh("first-apply-fails"), FAKE_FAIL_APPLY="1")
+checks["first deploy whose apply creates nothing reports a clean rollback"] = code == 1 and dep is None \
+    and "result=rolled_back previous_revision=none" in out
+
 state = fresh("transient-get")
 deploy(GOOD, state)
 before = json.loads(state.read_text())["deployment"]

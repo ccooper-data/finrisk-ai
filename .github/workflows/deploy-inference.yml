@@ -71,14 +71,43 @@ jobs:
         env:
           CODEBUILD_WAIT_MINUTES: "30"
           EVIDENCE_TERMINAL: "bootstrap=complete"
-        run: .github/scripts/run-codebuild.sh "$BOOTSTRAP_PROJECT"
+        run: exec .github/scripts/run-codebuild.sh "$BOOTSTRAP_PROJECT"
 
       # Namespace-scoped build; the image URI is the only value the caller supplies.
       - name: Deploy digest-pinned image
         env:
           CODEBUILD_WAIT_MINUTES: "45"
           EVIDENCE_TERMINAL: "result="
-        run: .github/scripts/run-codebuild.sh "$DEPLOY_PROJECT" "FINRISK_IMAGE_URI=${{ steps.image.outputs.uri }}"
+        run: exec .github/scripts/run-codebuild.sh "$DEPLOY_PROJECT" "FINRISK_IMAGE_URI=${{ steps.image.outputs.uri }}"
+
+      # The build steps exec the runner script so a cancel reaches its stop-build trap, but the
+      # runner kills a cancelled step 10 seconds after signalling it. This step stops any build
+      # still without a final status and waits for the stop while the job holds the concurrency
+      # group, so a queued DESTROY cannot start under it. Bounded to end inside GitHub's 5-minute
+      # cancellation timeout.
+      - name: Stop unfinished builds
+        if: failure() || cancelled()
+        timeout-minutes: 4
+        run: |
+          [ -f "$EVIDENCE_FILE" ] || exit 0
+          for id in $(sed -n 's/^[a-z0-9-]*_build_id=//p' "$EVIDENCE_FILE"); do
+            project="${id%%:*}"
+            grep -q "^${project}_status=" "$EVIDENCE_FILE" && continue
+            echo "::warning::Stopping $id"
+            aws codebuild stop-build --id "$id" >/dev/null || true
+            deadline=$((SECONDS + 180))
+            while :; do
+              status="$(aws codebuild batch-get-builds --ids "$id" --query 'builds[0].buildStatus' --output text)" || status=UNKNOWN
+              [ "$status" != IN_PROGRESS ] && [ "$status" != UNKNOWN ] && break
+              [ "$SECONDS" -lt "$deadline" ] || break
+              sleep 5
+            done
+            echo "${project}_status_after_stop=$status" >> "$EVIDENCE_FILE"
+            if [ "$status" = IN_PROGRESS ] || [ "$status" = UNKNOWN ]; then
+              echo "::error::$id may still be running; do not DESTROY until it has stopped"
+              exit 1
+            fi
+          done
 
       - name: Upload deployment evidence
         if: always()

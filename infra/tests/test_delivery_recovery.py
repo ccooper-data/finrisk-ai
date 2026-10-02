@@ -24,7 +24,8 @@ checks = {
     "in-pod smoke test checks the pinned model": "exec -i deploy/\"$APP\"" in buildspec and 'EXPECTED = "${model_sha256}"' in buildspec,
     "rollback to the recorded revision": '--to-revision="$PREV_REV"' in buildspec,
     "failed first deploy is deleted, not left at zero replicas": 'delete deployment "$APP"' in buildspec and "--replicas=0" not in buildspec,
-    "only NotFound counts as a first deploy": "--ignore-not-found" in buildspec and "2>/dev/null || true" not in buildspec,
+    "only NotFound counts as a first deploy": 'PREV_REV="$("$K" -n "$NS" get deployment "$APP" --ignore-not-found ' in buildspec
+        and "2>/dev/null || true" not in buildspec,
     "rollback itself is health-checked": buildspec.count('rollout status deployment/"$APP" --timeout=300s') >= 2,
     "failed rollout stays failed": "result=rolled_back" in buildspec and "result=rollback_failed" in buildspec
         and buildspec.rstrip().endswith("exit 1\n        fi"),
@@ -32,6 +33,12 @@ checks = {
     "deployment serialized with provision/destroy": "group: finrisk-bounded-aws-validation" in workflow
         and "cancel-in-progress: false" in workflow,
     "abandoned builds are stopped": "stop-build" in runner and "trap stop_if_running EXIT" in runner,
+    # Behaviour is exercised against a fake aws in test_run_codebuild_runtime.py.
+    "a cancel reaches the runner's trap at once": workflow.count("run: exec .github/scripts/run-codebuild.sh") == 2
+        and "& wait $!" in runner,
+    "cancelled or failed runs stop unfinished builds before releasing the group": "- name: Stop unfinished builds" in workflow
+        and "if: failure() || cancelled()" in workflow
+        and workflow.index("Stop unfinished builds") < workflow.index("Upload deployment evidence"),
     "success requires the final evidence line": "final evidence line was not found" in runner and "--next-token" in runner,
 }
 

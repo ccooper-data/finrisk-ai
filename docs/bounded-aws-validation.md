@@ -12,6 +12,8 @@ The first window (2026-10-02) proved infrastructure provisioning and teardown. T
 - The deploy build rolls out the digest-pinned image, the pod is ready, and the in-pod smoke test returns a valid prediction from the pinned model.
 - Evidence is captured, then the environment is destroyed no later than the persisted teardown lease.
 
+A failed deploy is rolled back inside the build (deleted, on a first deploy). The window does not exercise that path, because the controlled deploy cannot ship a non-ready candidate; it is validated offline by `infra/tests/test_deploy_buildspec_runtime.py` (see `docs/live-aws-validation-plan.md`).
+
 ## Deploy path
 
 GitHub-hosted runners cannot reach the private EKS endpoint, so two CodeBuild projects run inside the private subnets (`infra/terraform/deploy_path.tf`). Their buildspecs are fixed by Terraform and reviewed with the plan.
