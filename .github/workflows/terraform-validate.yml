@@ -8,7 +8,11 @@ on:
       - "infra/tests/**"
       - ".github/workflows/terraform-validate.yml"
       - ".github/workflows/provision-bounded-aws.yml"
+      - ".github/workflows/reap-bounded-aws.yml"
       - ".github/workflows/deploy-inference.yml"
+      - "docs/aws-bootstrap-policy.json"
+      - "docs/aws-bootstrap-trust-policy.json"
+      - "docs/aws-eks-boundary-policy.json"
   workflow_dispatch:
 
 permissions:

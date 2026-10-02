@@ -57,7 +57,7 @@ checks={
  "reaper scheduled": 'cron: "17 * * * *"' in reaper,
  "reaper does not swallow state errors": "terraform -chdir=\"$TF_DIR\" state list > state.txt" in reaper,
  "reaper inspects state before the lease": reaper.index("name: Inspect state") < reaper.index("name: Read teardown lease"),
- "reaper treats a missing lease as idle, not failure": "(404)" in reaper and 'echo "present=false"' in reaper,
+ "reaper treats a missing lease as idle, not failure": "(NoSuchKey)" in reaper and 'echo "present=false"' in reaper,
  "reaper destroys unleased state (fail-safe)": "steps.lease.outputs.present == 'false' || steps.lease.outputs.expired == 'true'" in reaper,
  "reaper never clears an active lease": "if: steps.lease.outputs.present == 'true' && steps.lease.outputs.expired == 'true'" in reaper,
  "validation contract ACTIVE only": "control plane reaches `ACTIVE`" in contract and "node group reaches `ACTIVE`" in contract,

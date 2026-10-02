@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2]
 provision=(ROOT/".github/workflows/provision-bounded-aws.yml").read_text()
 reaper=(ROOT/".github/workflows/reap-bounded-aws.yml").read_text()
+validate_wf=(ROOT/".github/workflows/terraform-validate.yml").read_text()
 eks=(ROOT/"infra/terraform/eks.tf").read_text()
 outputs=(ROOT/"infra/terraform/outputs.tf").read_text()
 # Only source files: CI runs `terraform init` first, which adds a .terraform directory here.
@@ -49,6 +50,13 @@ checks={
    and provision.index("name: Verify destroy state") < provision.index("Clear teardown lease after verified destroy"),
  "reaper re-checks lease ETag before clearing": "LEASE_ETAG" in reaper and 'echo "etag=$etag"' in reaper
    and '[ "$current" != "$LEASE_ETAG" ]' in reaper,
+ "reaper reads lease body and ETag in one call": "aws s3api get-object" in reaper and "aws s3 cp" not in reaper,
+ "deployer cannot delete the Terraform state object": stmts.get("DenyTerraformStateObjectDeletion",{}).get("Effect")=="Deny"
+   and stmts["DenyTerraformStateObjectDeletion"]["Action"]=="s3:DeleteObject"
+   and stmts["DenyTerraformStateObjectDeletion"]["Resource"].endswith("/finrisk-ai/portfolio/terraform.tfstate")
+   and "TF_STATE_KEY: finrisk-ai/portfolio/terraform.tfstate" in reaper and "TF_STATE_KEY: finrisk-ai/portfolio/terraform.tfstate" in provision,
+ "validation CI runs on reaper and policy changes": all(f'"{p}"' in validate_wf for p in
+   [".github/workflows/reap-bounded-aws.yml","docs/aws-bootstrap-policy.json","docs/aws-eks-boundary-policy.json"]),
  "budget output not called a hard ceiling": 'output "budget_alert_limit_usd"' in outputs and "hard_ceiling" not in outputs,
  "Terraform no longer calls the budget a hard ceiling": not any(re.search(r"hard[ _-]ceiling",t,re.I) for t in tf_text.values()),
 }

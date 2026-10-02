@@ -63,24 +63,24 @@ jobs:
           fi
           if test -s state.txt; then echo "nonempty=true" >> "$GITHUB_OUTPUT"; else echo "nonempty=false" >> "$GITHUB_OUTPUT"; fi
 
-      # A missing lease is a normal idle condition (404), not a failure. Any other
-      # read error fails the job so a broken reaper is visible.
+      # A missing lease is a normal idle condition (NoSuchKey), not a failure. Any other
+      # read error fails the job so a broken reaper is visible. One GetObject reads the
+      # body and its ETag together, so a lease deleted mid-read can't split them.
       - name: Read teardown lease
         id: lease
         env:
           TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
         run: |
-          if ! etag="$(aws s3api head-object --bucket "$TF_STATE_BUCKET" --key "$LEASE_KEY" --query ETag --output text 2> head.err)"; then
-            if grep -q '(404)' head.err; then
+          if ! etag="$(aws s3api get-object --bucket "$TF_STATE_BUCKET" --key "$LEASE_KEY" deadline.txt --query ETag --output text 2> get.err)"; then
+            if grep -q '(NoSuchKey)' get.err; then
               echo "present=false" >> "$GITHUB_OUTPUT"
               echo "No teardown lease present"
               exit 0
             fi
-            cat head.err >&2
+            cat get.err >&2
             exit 1
           fi
           echo "etag=$etag" >> "$GITHUB_OUTPUT"
-          aws s3 cp "s3://$TF_STATE_BUCKET/$LEASE_KEY" deadline.txt
           deadline="$(tr -d '\r\n' < deadline.txt)"
           test -n "$deadline"
           expires="$(date -u -d "$deadline" +%s)"
@@ -114,8 +114,10 @@ jobs:
           test -z "$remaining"
 
       # Only an expired lease is cleared. An active lease with empty state means an
-      # APPLY may be starting, so it is left in place. The ETag re-check avoids deleting
-      # a fresh lease that an APPLY wrote after this run read the old one.
+      # APPLY may be starting, so it is left in place. The ETag re-check skips the delete
+      # if an APPLY replaced the lease after this run read it. A ~1s window remains
+      # between the re-check and the delete; losing that race only makes the next run
+      # tear down early (fail-safe), never leaves resources running.
       - name: Clear expired lease
         if: steps.lease.outputs.present == 'true' && steps.lease.outputs.expired == 'true'
         env:
