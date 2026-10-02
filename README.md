@@ -28,6 +28,20 @@ SEC fundamentals ──> point-in-time observation ──> maturity gate ──>
 Exploratory extensions: FRED/ALFRED macro context and market-behavior contracts.
 ```
 
+## Validated AWS lifecycle
+
+The portfolio cloud architecture has been exercised against a real AWS account, not only statically planned.
+
+- GitHub Actions authenticates to AWS through short-lived OIDC credentials; no long-lived AWS key is stored in the repository.
+- Terraform state is remote, encrypted, versioned, and lock-protected.
+- Deployment promotion applies the exact reviewed binary plan after provenance and SHA-256 verification.
+- EKS uses a private API endpoint, least-privilege bootstrap permissions, and per-role permissions boundaries.
+- Cost controls combine AWS Budget alerts with a persisted teardown lease and an independent scheduled reaper.
+- The bounded validation window completed a successful reviewed APPLY and subsequent DESTROY; the destroy workflow's final Terraform state verification passed.
+- Application deployment is intentionally out of scope for the private-only infrastructure validation window.
+
+See [AWS validation closeout](docs/AWS_VALIDATION_CLOSEOUT.md) and [bounded AWS validation contract](docs/bounded-aws-validation.md).
+
 ## Leakage controls
 
 Every historical observation is bounded by its SEC filing date. Future filings, post-cutoff prices, later macro revisions, and future distress events cannot enter model features. Primary evaluation uses chronological train/validation/test partitions.
