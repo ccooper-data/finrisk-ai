@@ -1,0 +1,139 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BothRolesDescribeEC2InRegion",
+      "Effect": "Allow",
+      "Action": "ec2:Describe*",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-1"
+        }
+      }
+    },
+    {
+      "Sid": "ClusterRoleOnlyAmazonEKSClusterPolicy",
+      "Effect": "Allow",
+      "Action": [
+        "autoscaling:DescribeAutoScalingGroups",
+        "autoscaling:UpdateAutoScalingGroup",
+        "ec2:AttachVolume",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:CreateRoute",
+        "ec2:CreateSecurityGroup",
+        "ec2:CreateTags",
+        "ec2:CreateVolume",
+        "ec2:DeleteNetworkInterface",
+        "ec2:DeleteRoute",
+        "ec2:DeleteSecurityGroup",
+        "ec2:DeleteVolume",
+        "ec2:DetachVolume",
+        "ec2:ModifyInstanceAttribute",
+        "ec2:ModifyVolume",
+        "ec2:RevokeSecurityGroupIngress",
+        "elasticloadbalancing:*",
+        "kms:DescribeKey"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-1"
+        },
+        "ArnLike": {
+          "aws:PrincipalArn": "arn:aws:iam::780976819607:role/finrisk-ai-eks-cluster-*"
+        }
+      }
+    },
+    {
+      "Sid": "ClusterRoleOnlyELBServiceLinkedRole",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::780976819607:role/aws-service-role/elasticloadbalancing.amazonaws.com/*",
+      "Condition": {
+        "StringEquals": {
+          "iam:AWSServiceName": "elasticloadbalancing.amazonaws.com"
+        },
+        "ArnLike": {
+          "aws:PrincipalArn": "arn:aws:iam::780976819607:role/finrisk-ai-eks-cluster-*"
+        }
+      }
+    },
+    {
+      "Sid": "NodeRoleOnlyVpcCniEniManagement",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:AssignPrivateIpAddresses",
+        "ec2:AttachNetworkInterface",
+        "ec2:CreateNetworkInterface",
+        "ec2:DeleteNetworkInterface",
+        "ec2:DetachNetworkInterface",
+        "ec2:ModifyNetworkInterfaceAttribute",
+        "ec2:UnassignPrivateIpAddresses"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-1"
+        },
+        "ArnLike": {
+          "aws:PrincipalArn": "arn:aws:iam::780976819607:role/finrisk-ai-eks-nodes-*"
+        }
+      }
+    },
+    {
+      "Sid": "NodeRoleOnlyTagNetworkInterfaces",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": "arn:aws:ec2:us-east-1:780976819607:network-interface/*",
+      "Condition": {
+        "ArnLike": {
+          "aws:PrincipalArn": "arn:aws:iam::780976819607:role/finrisk-ai-eks-nodes-*"
+        }
+      }
+    },
+    {
+      "Sid": "NodeRoleOnlyJoinClusterAndPodIdentity",
+      "Effect": "Allow",
+      "Action": [
+        "eks:DescribeCluster",
+        "eks-auth:AssumeRoleForPodIdentity"
+      ],
+      "Resource": "arn:aws:eks:us-east-1:780976819607:cluster/finrisk-ai-*",
+      "Condition": {
+        "ArnLike": {
+          "aws:PrincipalArn": "arn:aws:iam::780976819607:role/finrisk-ai-eks-nodes-*"
+        }
+      }
+    },
+    {
+      "Sid": "NodeRoleOnlyPullImagesFromECR",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetAuthorizationToken",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchImportUpstreamImage"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-1"
+        },
+        "ArnLike": {
+          "aws:PrincipalArn": "arn:aws:iam::780976819607:role/finrisk-ai-eks-nodes-*"
+        }
+      }
+    },
+    {
+      "Sid": "DenyRoleChaining",
+      "Effect": "Deny",
+      "Action": [
+        "sts:AssumeRole",
+        "sts:TagSession",
+        "sts:SetSourceIdentity"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

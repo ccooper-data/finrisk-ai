@@ -131,16 +131,17 @@ jobs:
           cp reviewed-plan-evidence/bounded-validation.tfplan.sha256 "$TF_DIR/bounded-validation.tfplan.sha256"
           (cd "$TF_DIR" && sha256sum -c bounded-validation.tfplan.sha256)
 
-      - name: Apply exact reviewed binary plan
-        if: inputs.action == 'apply-reviewed-plan'
-        run: terraform -chdir="$TF_DIR" apply -auto-approve bounded-validation.tfplan
-
-      - name: Record teardown deadline
+      - name: Write teardown lease before apply
         if: inputs.action == 'apply-reviewed-plan'
         run: |
           deadline="$(date -u -d "+${VALIDATION_MAX_HOURS} hours" +%Y-%m-%dT%H:%M:%SZ)"
           printf '%s\n' "$deadline" > teardown-deadline.txt
+          aws s3 cp teardown-deadline.txt "s3://${{ vars.TF_STATE_BUCKET }}/leases/bounded-validation-deadline.txt"
           echo "::notice::Bounded validation teardown deadline: $deadline"
+
+      - name: Apply exact reviewed binary plan
+        if: inputs.action == 'apply-reviewed-plan'
+        run: terraform -chdir="$TF_DIR" apply -auto-approve bounded-validation.tfplan
 
       - name: Record provisioned outputs
         if: inputs.action == 'apply-reviewed-plan'

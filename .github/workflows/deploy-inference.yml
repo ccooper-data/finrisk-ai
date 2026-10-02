@@ -3,6 +3,11 @@ name: Deploy FinRisk Inference
 on:
   workflow_dispatch:
     inputs:
+      bounded_validation_override:
+        description: "Not authorized for private-only bounded validation; must remain false"
+        required: true
+        default: false
+        type: boolean
       image_tag:
         description: "Immutable ECR image tag (must be sha-<40 hex commit>)"
         required: true
@@ -27,6 +32,7 @@ concurrency:
 
 jobs:
   deploy:
+    if: ${{ inputs.bounded_validation_override == true }}
     environment: portfolio-validation
     runs-on: ubuntu-latest
     steps:

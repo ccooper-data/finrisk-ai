@@ -1,0 +1,107 @@
+name: Reap Expired AWS Validation
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: finrisk-bounded-aws-reaper
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  TF_DIR: infra/terraform
+  TF_STATE_KEY: finrisk-ai/portfolio/terraform.tfstate
+  LEASE_KEY: leases/bounded-validation-deadline.txt
+
+jobs:
+  reap:
+    environment: portfolio-validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Configure short-lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Initialize persistent Terraform state
+        run: |
+          terraform -chdir="$TF_DIR" init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=$TF_STATE_KEY" \
+            -backend-config="region=$AWS_REGION" \
+            -backend-config="dynamodb_table=${{ vars.TF_LOCK_TABLE }}" \
+            -backend-config="encrypt=true"
+
+      - name: Inspect state
+        id: state
+        run: |
+          terraform -chdir="$TF_DIR" state list > state.txt
+          if test -s state.txt; then echo "nonempty=true" >> "$GITHUB_OUTPUT"; else echo "nonempty=false" >> "$GITHUB_OUTPUT"; fi
+
+      # A missing lease is a normal idle condition (404), not a failure. Any other
+      # read error fails the job so a broken reaper is visible.
+      - name: Read teardown lease
+        id: lease
+        env:
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+        run: |
+          if ! err="$(aws s3api head-object --bucket "$TF_STATE_BUCKET" --key "$LEASE_KEY" 2>&1 >/dev/null)"; then
+            if grep -q '(404)' <<<"$err"; then
+              echo "present=false" >> "$GITHUB_OUTPUT"
+              echo "No teardown lease present"
+              exit 0
+            fi
+            printf '%s\n' "$err" >&2
+            exit 1
+          fi
+          aws s3 cp "s3://$TF_STATE_BUCKET/$LEASE_KEY" deadline.txt
+          deadline="$(tr -d '\r\n' < deadline.txt)"
+          test -n "$deadline"
+          expires="$(date -u -d "$deadline" +%s)"
+          echo "present=true" >> "$GITHUB_OUTPUT"
+          echo "deadline=$deadline" >> "$GITHUB_OUTPUT"
+          if [ "$(date -u +%s)" -ge "$expires" ]; then
+            echo "expired=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "expired=false" >> "$GITHUB_OUTPUT"
+            echo "Lease active until $deadline"
+          fi
+
+      # Fail-safe: resources in state with no lease are treated as expired.
+      - name: Destroy expired or unleased environment
+        if: steps.state.outputs.nonempty == 'true' && (steps.lease.outputs.present == 'false' || steps.lease.outputs.expired == 'true')
+        env:
+          TF_VAR_budget_alert_email: ${{ secrets.BUDGET_ALERT_EMAIL }}
+          LEASE_PRESENT: ${{ steps.lease.outputs.present }}
+        run: |
+          if [ "$LEASE_PRESENT" = "false" ]; then
+            echo "::warning::Terraform state has resources but no teardown lease; destroying (fail-safe)"
+          fi
+          terraform -chdir="$TF_DIR" destroy -auto-approve -lock-timeout=10m \
+            -var="aws_region=$AWS_REGION" \
+            -var="monthly_budget_limit_usd=100" \
+            -var="enable_eks=true" \
+            -var="enable_nat_gateway=true" \
+            -var="enable_observability=true" \
+            -var="enable_audit_trail=true"
+          remaining="$(terraform -chdir="$TF_DIR" state list)"
+          test -z "$remaining"
+
+      # Only an expired lease is cleared. An active lease with empty state means an
+      # APPLY may be starting, so it is left in place.
+      - name: Clear expired lease
+        if: steps.lease.outputs.present == 'true' && steps.lease.outputs.expired == 'true'
+        run: aws s3 rm "s3://${{ vars.TF_STATE_BUCKET }}/$LEASE_KEY"

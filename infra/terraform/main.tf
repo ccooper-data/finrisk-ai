@@ -12,7 +12,7 @@ provider "aws" {
 }
 
 locals {
-  budget_thresholds = toset(["10", "25", "50", "75", "90", "100"])
+  budget_thresholds = toset(["10", "25", "50", "75", "100"])
 }
 
 resource "aws_budgets_budget" "portfolio" {
@@ -29,17 +29,6 @@ resource "aws_budgets_budget" "portfolio" {
       threshold                  = tonumber(notification.value)
       threshold_type             = "ABSOLUTE_VALUE"
       notification_type          = "ACTUAL"
-      subscriber_email_addresses = [var.budget_alert_email]
-    }
-  }
-
-  dynamic "notification" {
-    for_each = nonsensitive(var.budget_alert_email == null) ? toset([]) : toset(["25", "50", "75", "90"])
-    content {
-      comparison_operator        = "GREATER_THAN"
-      threshold                  = tonumber(notification.value)
-      threshold_type             = "ABSOLUTE_VALUE"
-      notification_type          = "FORECASTED"
       subscriber_email_addresses = [var.budget_alert_email]
     }
   }

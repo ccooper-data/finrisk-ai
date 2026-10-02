@@ -16,9 +16,11 @@ roles = {
     "arn:aws:iam::*:role/finrisk-ai-eks-nodes-*",
 }
 checks = {
-    "role scopes match generated names": all(set(statements[s]["Resource"]) == roles for s in [
-        "ManageFinRiskRoles", "AttachOnlyApprovedManagedPolicies", "PassOnlyFinRiskRolesToCompute"
-    ]) and "var.project_name}-eks-cluster-" in eks and "var.project_name}-eks-nodes-" in eks,
+    "role scopes match generated names": set(statements["ManageFinRiskRoles"]["Resource"]) == roles
+        and set(statements["PassOnlyFinRiskRolesToCompute"]["Resource"]) == roles
+        and statements["AttachApprovedClusterPolicy"]["Resource"] == "arn:aws:iam::*:role/finrisk-ai-eks-cluster-*"
+        and statements["AttachApprovedNodePolicies"]["Resource"] == "arn:aws:iam::*:role/finrisk-ai-eks-nodes-*"
+        and "var.project_name}-eks-cluster-" in eks and "var.project_name}-eks-nodes-" in eks,
     "role creation requires boundary": statements["CreateBoundedFinRiskRoles"]["Condition"]["StringEquals"]["iam:PermissionsBoundary"]
         == "arn:aws:iam::780976819607:policy/finrisk-ai-eks-boundary",
     "Terraform attaches boundary": eks.count("permissions_boundary") == 2,
