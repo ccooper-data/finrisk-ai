@@ -1,5 +1,5 @@
 # Library versions that produced the served boosted-tree artifact
-# (Train boosted-tree benchmark run 36629980862, Python 3.12).
+# (Train boosted-tree benchmark run 37055204267, Python 3.12).
 # scikit-learn pickles are only guaranteed to load with the version that wrote them,
 # so the serving image installs exactly these.
 scikit-learn==1.9.1
