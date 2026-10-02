@@ -16,4 +16,13 @@ The bounded AWS validation window proves infrastructure provisioning and teardow
 
 ## Cost enforcement
 
-APPLY writes a six-hour teardown lease to the private Terraform state bucket before creating runtime infrastructure. `reap-bounded-aws.yml` checks the lease hourly using a separate concurrency group and destroys expired non-empty Terraform state. State or lease read failures fail the reaper rather than being ignored.
+APPLY writes a six-hour teardown lease to the private Terraform state bucket before creating runtime infrastructure. `reap-bounded-aws.yml` runs hourly in a separate concurrency group:
+
+- Empty state: nothing to do. An expired lease is cleared; an active lease is left alone because an APPLY may be starting.
+- Non-empty state with an expired lease: destroy.
+- Non-empty state with no lease: destroy (fail-safe).
+- A missing lease (404) is a normal idle condition. Any other state or lease read error fails the reaper rather than being ignored.
+
+## Permissions boundary
+
+`docs/aws-eks-boundary-policy.json` is the content of the out-of-band IAM policy `finrisk-ai-eks-boundary`. After changing the file, update that policy in AWS so its default version matches the file exactly.

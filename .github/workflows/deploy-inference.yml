@@ -8,7 +8,6 @@ on:
         required: true
         default: false
         type: boolean
-    inputs:
       image_tag:
         description: "Immutable ECR image tag (must be sha-<40 hex commit>)"
         required: true

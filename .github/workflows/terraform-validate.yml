@@ -39,8 +39,18 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           import yaml
+
+          # GitHub rejects duplicate mapping keys; PyYAML silently keeps the last one.
+          class StrictLoader(yaml.SafeLoader):
+              def construct_mapping(self, node, deep=False):
+                  keys = [self.construct_object(k, deep=deep) for k, _ in node.value]
+                  dupes = {k for k in keys if keys.count(k) > 1}
+                  if dupes:
+                      raise yaml.constructor.ConstructorError(None, None, f"duplicate keys {sorted(dupes)}", node.start_mark)
+                  return super().construct_mapping(node, deep=deep)
+
           for path in Path(".github/workflows").glob("*.yml"):
-              yaml.safe_load(path.read_text())
+              yaml.load(path.read_text(), Loader=StrictLoader)
               print(f"PASS: {path}")
           PY
       - name: Compile infrastructure acceptance tests
