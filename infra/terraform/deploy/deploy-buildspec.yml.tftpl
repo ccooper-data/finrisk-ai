@@ -2,8 +2,9 @@ version: 0.2
 
 # Workload deploy. Runs as a role holding AmazonEKSEditPolicy scoped to the ${namespace}
 # namespace only. This file is fixed by Terraform and reviewed with the plan. The release
-# role can set exactly one StartBuild override, FINRISK_IMAGE_URI, and IAM denies every
-# other override; the value is validated again below.
+# role can set exactly one StartBuild override, FINRISK_IMAGE_URI; IAM denies every other
+# override that has a condition key (timeout and debug-session overrides have none, and debug
+# sessions cannot connect without ssmmessages permissions). The value is validated again below.
 
 env:
   shell: bash
@@ -83,8 +84,9 @@ phases:
               % (EXPECTED, len(features), probability))
         PY
 
-        # Recorded before applying so a failure can return to exactly this revision.
-        PREV_REV="$("$K" -n "$NS" get deployment "$APP" -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}' 2>/dev/null || true)"
+        # Recorded before applying so a failure can return to exactly this revision. Only
+        # NotFound means a first deploy; any other error stops here, before anything changes.
+        PREV_REV="$("$K" -n "$NS" get deployment "$APP" --ignore-not-found -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')"
 
         "$K" apply --server-side --field-manager=finrisk-codebuild --force-conflicts --dry-run=server -f /tmp/manifest.yaml
 
@@ -103,9 +105,11 @@ phases:
             "$K" -n "$NS" rollout undo deployment/"$APP" --to-revision="$PREV_REV" || return 1
             "$K" -n "$NS" rollout status deployment/"$APP" --timeout=300s || return 1
           else
-            # First deploy: there is no earlier revision to return to.
-            echo "First deploy failed; scaling $APP to zero"
-            "$K" -n "$NS" scale deployment/"$APP" --replicas=0 || return 1
+            # First deploy: there is no earlier revision to return to. Delete rather than scale
+            # to zero: the HPA never scales up from zero and the manifest sets no replicas, so a
+            # zero-replica Deployment would stay at zero through every later apply.
+            echo "First deploy failed; deleting $APP"
+            "$K" -n "$NS" delete deployment "$APP" --wait=true || return 1
           fi
         }
 

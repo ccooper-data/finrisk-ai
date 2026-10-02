@@ -18,24 +18,26 @@ GitHub-hosted runners cannot reach the private EKS endpoint, so two CodeBuild pr
 
 | Identity | Can do | Cannot do |
 |---|---|---|
-| `github-finrisk-deployer` (environment `portfolio-validation`) | Terraform lifecycle, including the CodeBuild projects and their roles | Start builds; associate any EKS access policy other than the two below |
-| `github-finrisk-releaser` (environment `portfolio-release`) | Push images to `finrisk-ai-inference`; start the two builds; read their logs | Change either project; override anything except `FINRISK_IMAGE_URI` on the deploy build |
+| `github-finrisk-deployer` (environment `portfolio-validation`) | Terraform lifecycle, including the CodeBuild projects and their roles | Start builds; associate any EKS access policy other than the two below; assume any `finrisk-ai-*` role; create a cluster that grants its creator admin |
+| `github-finrisk-releaser` (environment `portfolio-release`) | Push images to `finrisk-ai-inference`; start, watch and stop the two builds; read their logs | Change either project; override anything with an IAM condition key except `FINRISK_IMAGE_URI` on the deploy build (timeout and debug-session overrides have no key; debug sessions cannot connect) |
 | `finrisk-ai-codebuild-bootstrap-*` | `AmazonEKSClusterAdminPolicy` (cluster scope); creates the `finrisk` namespace | Accept any caller-supplied variable |
 | `finrisk-ai-codebuild-deploy-*` | `AmazonEKSEditPolicy` scoped to `finrisk`: apply, roll out, exec smoke test, roll back | Create namespaces or touch other namespaces |
 
-The served model is pinned in `model/served-model.json` (source run, size, SHA-256). Changing it takes a reviewed commit.
+The served model is pinned in `model/served-model.json` (source run, size, SHA-256). Changing it takes a reviewed commit, and the image build also checks that the training run's recorded Python, scikit-learn, numpy and pandas versions match `constraints/serving.txt`.
+
+Actions artifacts expire after 30 days. The pinned model artifact (run 37055204267) expires 2026-11-01, and the cohort artifact that retraining needs (run 36626740566) expires 2026-10-29. After that, rebuild the cohort, retrain, show prediction equivalence with the pinned model, and update the pin in a reviewed commit; never loosen the provenance checks.
 
 ### One-time setup (administrator, before the next PLAN)
 
 1. Update `finrisk-ai-eks-boundary` to match `docs/aws-eks-boundary-policy.json`.
 2. Create the managed policy `finrisk-ai-deployer-deploy-path` from `docs/aws-deployer-deploy-path-policy.json` and attach it to `github-finrisk-deployer`.
-3. Create the role `github-finrisk-releaser` with trust policy `docs/aws-release-trust-policy.json` and inline policy `docs/aws-release-policy.json`.
+3. Create the role `github-finrisk-releaser` with trust policy `docs/aws-release-trust-policy.json`, inline policy `docs/aws-release-policy.json`, and maximum session duration 2 hours.
 4. In GitHub, create the environment `portfolio-release` limited to `main`, with the variable `AWS_RELEASE_ROLE_ARN`.
 5. Optional, recommended: confirm with the IAM policy simulator that `StartBuild` requests carrying `BASH_ENV`, a buildspec override or an image override are denied, and that a request with only a digest-pinned `FINRISK_IMAGE_URI` is allowed.
 
 ### Window sequence
 
-PLAN, review, APPLY the reviewed plan, then **Build Inference Image** (the ECR repository exists only while the stack is up), then **Deploy FinRisk Inference** with the image tag `sha-<commit>` from the build, then capture evidence and DESTROY.
+PLAN, review, APPLY the reviewed plan, then **Build Inference Image** (the ECR repository exists only while the stack is up), then **Deploy FinRisk Inference**, then capture evidence and DESTROY. `main` stays frozen from PLAN to DESTROY: the deploy takes no image input and uses the image built from its own commit, and the deploy buildspec's expected model SHA-256 is fixed at PLAN time, so all three must be the same commit. The deploy shares the provision workflow's concurrency group, so a DESTROY never starts under a running in-VPC build.
 
 ## Cost enforcement
 
@@ -60,7 +62,7 @@ A manual DESTROY clears the lease once it has verified that state is empty.
 
 ## Recovery: DESTROY stuck on a subnet, security group, or VPC
 
-Rarely, the VPC CNI leaves a network interface in the `available` state after the nodes terminate. Terraform does not delete those itself, so deleting the subnet, security group, or VPC retries for up to 20 minutes and then fails. The NAT gateway, EIP and EKS resources are already gone by then, so the leftover network costs nothing. To recover, an administrator deletes the leftover interfaces in the VPC (EC2 console, **Network Interfaces**, filter by the VPC, status `available`), then runs DESTROY again.
+Rarely, the VPC CNI leaves a network interface in the `available` state after the nodes terminate. Terraform does not delete those itself, so deleting the subnet, security group, or VPC retries for up to 20 minutes and then fails. The NAT gateway, EIP and EKS resources are already gone by then, so the leftover network costs nothing. To recover, an administrator deletes the leftover interfaces in the VPC (EC2 console, **Network Interfaces**, filter by the VPC, status `available`), then runs DESTROY again. The same applies to an interface left by a CodeBuild runner (description starting `AWS CodeBuild`).
 
 ## Permissions boundary
 

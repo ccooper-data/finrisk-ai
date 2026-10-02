@@ -4,20 +4,20 @@ name: Deploy FinRisk Inference
 # infra/terraform/deploy_path.tf. The release role can start those two builds and set only
 # FINRISK_IMAGE_URI (a digest-pinned image in this account's repository); it cannot change what
 # they run. Rollout, readiness, smoke test and rollback happen inside the deploy buildspec.
+#
+# There is no image input: it deploys the image Build Inference Image pushed for this same
+# commit. The deploy buildspec's expected model SHA-256 was fixed at PLAN time, and main stays
+# frozen from PLAN to DESTROY, so image, pin and plan all come from one commit.
 on:
   workflow_dispatch:
-    inputs:
-      image_tag:
-        description: "Image tag pushed by Build Inference Image (sha-<40 hex commit>)"
-        required: true
-        type: string
 
 permissions:
   contents: read
   id-token: write
 
+# Shares the provision workflow's group so a DESTROY never runs under an in-VPC build.
 concurrency:
-  group: finrisk-portfolio-deploy
+  group: finrisk-bounded-aws-validation
   cancel-in-progress: false
 
 env:
@@ -31,34 +31,32 @@ jobs:
   deploy:
     environment: portfolio-release
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate immutable image identity
-        env:
-          IMAGE_TAG: ${{ inputs.image_tag }}
+      - name: Image tag for this commit
+        id: tag
         run: |
-          python - <<'PY'
-          import os, re
-          tag = os.environ["IMAGE_TAG"]
-          if not re.fullmatch(r"sha-[0-9a-f]{40}", tag):
-              raise SystemExit("image_tag must be immutable sha-<40 lowercase hex>")
-          PY
+          tag="sha-${GITHUB_SHA}"
+          [[ "$tag" =~ ^sha-[0-9a-f]{40}$ ]] || { echo "unexpected commit SHA"; exit 1; }
+          echo "value=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Configure short-lived AWS credentials (release role)
         uses: aws-actions/configure-aws-credentials@v5
         with:
           role-to-assume: ${{ vars.AWS_RELEASE_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+          # Both builds can take up to 65 minutes; requires the role's MaxSessionDuration >= 7200.
+          role-duration-seconds: 7200
 
       - name: Resolve immutable ECR image digest
         id: image
         env:
-          IMAGE_TAG: ${{ inputs.image_tag }}
+          IMAGE_TAG: ${{ steps.tag.outputs.value }}
         run: |
           digest="$(aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$IMAGE_TAG" --query 'imageDetails[0].imageDigest' --output text)"
-          case "$digest" in (sha256:*) ;; (*) echo "could not resolve image digest for $IMAGE_TAG"; exit 1;; esac
+          case "$digest" in (sha256:*) ;; (*) echo "no image for $IMAGE_TAG; run Build Inference Image on this commit first"; exit 1;; esac
           account="$(aws sts get-caller-identity --query Account --output text)"
           echo "uri=${account}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@$digest" >> "$GITHUB_OUTPUT"
           mkdir -p evidence
@@ -70,10 +68,16 @@ jobs:
 
       # Fixed build with cluster scope; IAM denies every override for it.
       - name: Bootstrap namespace
+        env:
+          CODEBUILD_WAIT_MINUTES: "30"
+          EVIDENCE_TERMINAL: "bootstrap=complete"
         run: .github/scripts/run-codebuild.sh "$BOOTSTRAP_PROJECT"
 
       # Namespace-scoped build; the image URI is the only value the caller supplies.
       - name: Deploy digest-pinned image
+        env:
+          CODEBUILD_WAIT_MINUTES: "45"
+          EVIDENCE_TERMINAL: "result="
         run: .github/scripts/run-codebuild.sh "$DEPLOY_PROJECT" "FINRISK_IMAGE_URI=${{ steps.image.outputs.uri }}"
 
       - name: Upload deployment evidence

@@ -80,6 +80,8 @@ jobs:
         run: python infra/tests/test_post_validation_hardening.py
       - name: EKS deploy path acceptance
         run: python infra/tests/test_eks_deploy_path.py
+      - name: Deploy buildspec runtime acceptance
+        run: python infra/tests/test_deploy_buildspec_runtime.py
       - name: Inference image acceptance
         run: python infra/tests/test_inference_image.py
       - name: Cloud security acceptance

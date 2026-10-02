@@ -47,9 +47,10 @@ resource "aws_security_group" "codebuild" {
     Name = "${var.project_name}-${var.environment}-codebuild-sg"
   }
 
-  lifecycle {
-    create_before_destroy = true
-  }
+  # Destroy order: this group goes before the runner role policies, so CodeBuild can still
+  # delete a running build's network interface (with the role's ec2:DeleteNetworkInterface)
+  # while Terraform waits to delete the group.
+  depends_on = [aws_iam_role_policy.codebuild_bootstrap, aws_iam_role_policy.codebuild_deploy]
 }
 
 # Attached only to the control-plane ENIs (vpc_config.security_group_ids). A rule on the
@@ -183,7 +184,7 @@ resource "aws_codebuild_project" "k8s_bootstrap" {
   description            = "Creates the ${local.k8s_app_namespace} namespace on the private EKS cluster"
   service_role           = aws_iam_role.codebuild_bootstrap[0].arn
   build_timeout          = 15
-  queued_timeout         = 30
+  queued_timeout         = 10
   concurrent_build_limit = 1
 
   artifacts {
@@ -233,7 +234,7 @@ resource "aws_codebuild_project" "k8s_deploy" {
   description            = "Deploys the digest-pinned inference image to the ${local.k8s_app_namespace} namespace"
   service_role           = aws_iam_role.codebuild_deploy[0].arn
   build_timeout          = 30
-  queued_timeout         = 30
+  queued_timeout         = 10
   concurrent_build_limit = 1
 
   artifacts {

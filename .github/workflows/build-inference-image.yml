@@ -43,6 +43,14 @@ jobs:
           echo "file=$(jq -r '.file' "$pin")" >> "$GITHUB_OUTPUT"
           echo "size=$(jq -r '.size_bytes' "$pin")" >> "$GITHUB_OUTPUT"
           echo "sha256=$(jq -r '.sha256' "$pin")" >> "$GITHUB_OUTPUT"
+          # Actions artifacts expire (train-boosted-tree.yml keeps them 30 days). An expired pin
+          # is fixed by retraining, showing equivalence and re-pinning, never by skipping checks.
+          artifact="$(jq -r '.artifact_name' "$pin")"
+          expired="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts" --jq ".artifacts[] | select(.name == \"$artifact\") | .expired")"
+          if [ "$expired" != "false" ]; then
+            echo "::error::Pinned artifact $artifact is expired or missing. Retrain, show prediction equivalence, and update model/served-model.json in a reviewed commit."
+            exit 1
+          fi
 
       - name: Download pinned model artifact
         uses: actions/download-artifact@v4
@@ -75,6 +83,27 @@ jobs:
           cp "model-artifact/$MODEL_FILE" model/boosted_tree_model.joblib
           echo "sha256=$actual" >> "$GITHUB_OUTPUT"
 
+      # scikit-learn pickles load reliably only with the versions that wrote them. The training
+      # run records its environment next to the model; the serving pins must match it exactly.
+      - name: Check serving pins against the training environment
+        run: |
+          env_json="$(jq -c '.environment' model-artifact/boosted_tree_metrics.json)"
+          for pair in scikit-learn:scikit_learn numpy:numpy pandas:pandas; do
+            package="${pair%%:*}"; field="${pair#*:}"
+            trained="$(jq -r --arg f "$field" '.[$f]' <<<"$env_json")"
+            pinned="$(sed -n "s/^${package}==//p" constraints/serving.txt)"
+            if [ "$trained" != "$pinned" ]; then
+              echo "::error::$package: training used $trained, constraints/serving.txt pins $pinned"
+              exit 1
+            fi
+          done
+          trained_python="$(jq -r '.python' <<<"$env_json" | cut -d. -f1,2)"
+          image_python="$(sed -n 's/^FROM python:\([0-9]*\.[0-9]*\)-slim$/\1/p' Dockerfile)"
+          if [ "$trained_python" != "$image_python" ]; then
+            echo "::error::Python: training used $trained_python, the image uses $image_python"
+            exit 1
+          fi
+
       - name: Build candidate image
         run: |
           docker build --pull \
@@ -82,6 +111,14 @@ jobs:
             --build-arg MODEL_SHA256="${{ steps.model.outputs.sha256 }}" \
             --build-arg MODEL_RUN_ID="${{ steps.pin.outputs.run_id }}" \
             --tag "finrisk-inference:candidate" .
+
+      - name: Check library versions inside the image
+        run: |
+          docker run --rm --entrypoint python finrisk-inference:candidate -c \
+            'import json, sklearn, numpy, pandas; print(json.dumps({"scikit-learn": sklearn.__version__, "numpy": numpy.__version__, "pandas": pandas.__version__}))' > image-versions.json
+          for package in scikit-learn numpy pandas; do
+            test "$(jq -r --arg p "$package" '.[$p]' image-versions.json)" = "$(sed -n "s/^${package}==//p" constraints/serving.txt)"
+          done
 
       # The image must load the real model and serve a prediction before it is pushed.
       - name: Verify candidate serves the model

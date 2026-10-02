@@ -24,7 +24,7 @@ build_wf = (ROOT / ".github/workflows/build-inference-image.yml").read_text()
 provision_wf = (ROOT / ".github/workflows/provision-bounded-aws.yml").read_text()
 runner = (ROOT / ".github/scripts/run-codebuild.sh").read_text()
 REF = {s: json.loads((ROOT / f"infra/tests/fixtures/aws-service-reference/{s}.json").read_text())["actions"]
-       for s in ("codebuild", "eks", "iam")}
+       for s in ("codebuild", "eks", "iam", "sts")}
 
 ACCOUNT, REGION, REPO = "780976819607", "us-east-1", "finrisk-ai-inference"
 CODEBUILD_ROLE = f"arn:aws:iam::{ACCOUNT}:role/finrisk-ai-codebuild-deploy-example"
@@ -123,6 +123,15 @@ runtime = json.loads(render(runtime_tpl, region=REGION, account_id=ACCOUNT,
 runtime_actions = {a for s in runtime["Statement"] for a in as_list(s["Action"])}
 
 override_denies = [s for s in release["Statement"] if s["Sid"].startswith("DenyOverride")]
+denied_keys = {k for s in override_denies for k in s["Condition"]["Null"]}
+# The deploy build legitimately sets one environment variable, so the environment section and
+# the env-var keys are governed by the dedicated statements instead of a blanket Null deny.
+ENV_GOVERNED = {"codebuild:environment"}
+uncovered_startbuild_keys = [
+    k for k in REF["codebuild"]["StartBuild"]["condition_keys"]
+    if k not in ENV_GOVERNED and not k.startswith("codebuild:environment.environmentVariables")
+    and not any(k == d or k.startswith(d + ".") or k.startswith(d + "/") for d in denied_keys)
+]
 release_allowed = {a for s in release["Statement"] if s["Effect"] == "Allow" for a in as_list(s["Action"])}
 deploy_cfg = block(path_tf, 'resource "aws_codebuild_project" "k8s_deploy"')
 bootstrap_cfg = block(path_tf, 'resource "aws_codebuild_project" "k8s_bootstrap"')
@@ -164,11 +173,14 @@ checks = {
     "release role can only push images and run the two builds": release_allowed == {
         "ecr:GetAuthorizationToken", "ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:CompleteLayerUpload",
         "ecr:DescribeImages", "ecr:InitiateLayerUpload", "ecr:PutImage", "ecr:UploadLayerPart",
-        "codebuild:StartBuild", "codebuild:BatchGetBuilds", "logs:GetLogEvents"},
+        "codebuild:StartBuild", "codebuild:BatchGetBuilds", "codebuild:StopBuild", "logs:GetLogEvents"},
     "release policy uses only real StartBuild condition keys": not unknown_condition_keys(release),
-    "one Null deny per override key (keys are ANDed within a statement)": len(override_denies) >= 25
+    "one Null deny per override key (keys are ANDed within a statement)": len(override_denies) >= 15
         and all(list(s["Condition"]) == ["Null"] and len(s["Condition"]["Null"]) == 1
                 and list(s["Condition"]["Null"].values()) == ["false"] for s in override_denies),
+    "every StartBuild override key is denied (itself or its section)": not uncovered_startbuild_keys,
+    "bootstrap denies the whole environment section": stmt(release, "BootstrapAcceptsNoEnvironmentOverride")["Condition"]
+        == {"Null": {"codebuild:environment": "false"}},
     "buildspec, image, role and privileged overrides denied": {"codebuild:source.buildspec", "codebuild:environment.image",
         "codebuild:serviceRole", "codebuild:environment.privilegedMode", "codebuild:source.location"}
         <= {k for s in override_denies for k in s["Condition"]["Null"]},
@@ -192,6 +204,17 @@ checks = {
         and stmt(deployer_path, "AssociateNamespacedEditToDeployRunner")["Condition"]["ArnEquals"] == {"eks:policyArn": EDIT}
         and stmt(deployer_path, "AssociateNamespacedEditToDeployRunner")["Condition"]["ForAllValues:StringEquals"] == {"eks:namespaces": "finrisk"}
         and all("codebuild-bootstrap-" in r for r in stmt(deployer_path, "AssociateClusterAdminToBootstrapRunner")["Resource"]),
+    "projects must be created in a VPC": stmt(deployer_path, "K8sCodeBuildProjectsMustRunInVpc")["Action"] == "codebuild:CreateProject"
+        and stmt(deployer_path, "K8sCodeBuildProjectsMustRunInVpc")["Condition"] == {"Null": {"codebuild:vpcConfig.vpcId": "true"}},
+    "in-place project updates allowed unless they drop the VPC": stmt(deployer_path, "K8sCodeBuildUpdatesCannotDropVpc")["Condition"]
+        == {"Null": {"codebuild:vpcConfig": "false", "codebuild:vpcConfig.vpcId": "true"}},
+    "Terraform role cannot assume runner or EKS roles": stmt(deployer_path, "DenyAssumingFinriskRoles")["Resource"]
+        == f"arn:aws:iam::{ACCOUNT}:role/finrisk-ai-*" and "sts:AssumeRole" in stmt(deployer_path, "DenyAssumingFinriskRoles")["Action"],
+    "no cluster may grant its creator admin": stmt(deployer_path, "DenyClusterCreatorAdmin")["Condition"]
+        == {"BoolIfExists": {"eks:bootstrapClusterCreatorAdminPermissions": "true"}}
+        and stmt(deployer_path, "DenyNonApiClusterAuth")["Condition"] == {"StringNotEquals": {"eks:authenticationMode": "API"}},
+    "runner SG is destroyed while runner roles can still clean up ENIs": "depends_on = [aws_iam_role_policy.codebuild_bootstrap, aws_iam_role_policy.codebuild_deploy]"
+        in block(path_tf, 'resource "aws_security_group" "codebuild"') and "create_before_destroy" not in block(path_tf, 'resource "aws_security_group" "codebuild"'),
     "boundary cannot be removed or edited": {"iam:DeleteRolePermissionsBoundary", "iam:PutRolePermissionsBoundary"}
         <= set(stmt(deployer_path, "DenyBoundaryRemoval")["Action"])
         and "iam:CreatePolicyVersion" in stmt(deployer_path, "DenyBoundaryPolicyEdits")["Action"],

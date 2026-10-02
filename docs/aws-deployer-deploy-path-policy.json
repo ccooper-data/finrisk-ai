@@ -15,13 +15,22 @@
     {
       "Sid": "K8sCodeBuildProjectsMustRunInVpc",
       "Effect": "Deny",
-      "Action": [
-        "codebuild:CreateProject",
-        "codebuild:UpdateProject"
-      ],
+      "Action": "codebuild:CreateProject",
       "Resource": "*",
       "Condition": {
         "Null": {
+          "codebuild:vpcConfig.vpcId": "true"
+        }
+      }
+    },
+    {
+      "Sid": "K8sCodeBuildUpdatesCannotDropVpc",
+      "Effect": "Deny",
+      "Action": "codebuild:UpdateProject",
+      "Resource": "*",
+      "Condition": {
+        "Null": {
+          "codebuild:vpcConfig": "false",
           "codebuild:vpcConfig.vpcId": "true"
         }
       }
@@ -93,12 +102,6 @@
           "eks:accessEntryType": "EC2_LINUX"
         }
       }
-    },
-    {
-      "Sid": "ListClusterAccessEntries",
-      "Effect": "Allow",
-      "Action": "eks:ListAccessEntries",
-      "Resource": "arn:aws:eks:us-east-1:780976819607:cluster/finrisk-ai-portfolio"
     },
     {
       "Sid": "ManageCodeBuildAccessEntries",
@@ -236,6 +239,38 @@
         "iam:SetDefaultPolicyVersion"
       ],
       "Resource": "arn:aws:iam::780976819607:policy/finrisk-ai-eks-boundary"
+    },
+    {
+      "Sid": "DenyAssumingFinriskRoles",
+      "Effect": "Deny",
+      "Action": [
+        "sts:AssumeRole",
+        "sts:SetSourceIdentity",
+        "sts:TagSession"
+      ],
+      "Resource": "arn:aws:iam::780976819607:role/finrisk-ai-*"
+    },
+    {
+      "Sid": "DenyClusterCreatorAdmin",
+      "Effect": "Deny",
+      "Action": "eks:CreateCluster",
+      "Resource": "*",
+      "Condition": {
+        "BoolIfExists": {
+          "eks:bootstrapClusterCreatorAdminPermissions": "true"
+        }
+      }
+    },
+    {
+      "Sid": "DenyNonApiClusterAuth",
+      "Effect": "Deny",
+      "Action": "eks:CreateCluster",
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "eks:authenticationMode": "API"
+        }
+      }
     }
   ]
 }

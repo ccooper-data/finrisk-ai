@@ -29,9 +29,14 @@ checks = {
     "Python matches training (3.12)": dockerfile.splitlines()[[i for i, l in enumerate(dockerfile.splitlines()) if l.startswith("FROM ")][0]] == "FROM python:3.12-slim",
     "numeric non-root user (runAsNonRoot can verify it)": "USER 10001:10001" in dockerfile
         and "runAsUser: 10001" in manifest and "runAsGroup: 10001" in manifest,
-    "only the served model may enter the image": "*.joblib" in dockerignore
+    "only the served model may enter the image": "**/*.joblib" in dockerignore
         and "!model/boosted_tree_model.joblib" in dockerignore
-        and dockerignore.index("!model/boosted_tree_model.joblib") > dockerignore.index("*.joblib"),
+        and dockerignore.index("!model/boosted_tree_model.joblib") > dockerignore.index("**/*.joblib"),
+    "constraints name the pinned training run": f"run {pin['model_run_id']}," in constraints,
+    "build checks the training run's recorded library versions": "boosted_tree_metrics.json" in build
+        and "scikit_learn" in build and "FROM python:" in build,
+    "build checks library versions inside the image": "Check library versions inside the image" in build,
+    "expired pinned artifact fails with a re-pin instruction": ".expired" in build and "Retrain, show prediction equivalence" in build,
     "model file never committed": (ROOT / "model/.gitignore").read_text().strip() == "*.joblib",
     "writable /tmp with read-only root": "readOnlyRootFilesystem: true" in manifest and "mountPath: /tmp" in manifest,
     "pod gets no Kubernetes API token": "automountServiceAccountToken: false" in manifest,

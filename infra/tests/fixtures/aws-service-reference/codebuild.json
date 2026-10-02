@@ -197,6 +197,15 @@
     "project"
    ]
   },
+  "StopBuild": {
+   "condition_keys": [],
+   "resource_condition_keys": [
+    "aws:ResourceTag/${TagKey}"
+   ],
+   "resources": [
+    "project"
+   ]
+  },
   "UpdateProject": {
    "condition_keys": [
     "aws:RequestTag/${TagKey}",

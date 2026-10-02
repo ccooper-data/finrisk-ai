@@ -2,8 +2,9 @@ version: 0.2
 
 # Namespace bootstrap. Runs as a role holding AmazonEKSClusterAdminPolicy (cluster scope),
 # because only cluster admin can create namespaces. This file is fixed by Terraform and reviewed
-# with the plan; the release role's IAM denies every StartBuild override, including all
-# environment variables, so callers can only start it as written.
+# with the plan. The release role's IAM denies every StartBuild override that has a condition
+# key, including any environment override. Timeout and debug-session overrides have no key;
+# debug sessions cannot connect because this role has no ssmmessages permissions.
 
 env:
   shell: bash
