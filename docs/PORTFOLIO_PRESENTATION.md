@@ -2,7 +2,7 @@
 
 ## 60-second executive narrative
 
-FinRisk-AI is a point-in-time corporate financial-distress platform built to answer two questions: can the model identify elevated 12-month distress risk without look-ahead leakage, and can the resulting system be operated with evidence strong enough for a regulated or high-governance environment? I built the data and modeling pipeline around SEC filing-date knowledge boundaries, evaluated multiple model families chronologically, and then production-shaped the platform on AWS. The cloud lifecycle uses Terraform, EKS, GitHub OIDC, remote state and locking, least-privilege IAM, permissions boundaries, exact reviewed-plan promotion, budget controls, and fail-safe teardown. The final validation exercised a real AWS APPLY and deterministic DESTROY with an empty-state verification.
+FinRisk-AI is a point-in-time corporate financial-distress platform built to answer two questions: can the model identify elevated 12-month distress risk without look-ahead leakage, and can the resulting system be operated with evidence strong enough for a regulated or high-governance environment? I built the data and modeling pipeline around SEC filing-date knowledge boundaries, evaluated multiple model families chronologically, and then production-shaped the platform on AWS. The cloud lifecycle uses Terraform, EKS, GitHub OIDC, remote state and locking, scoped IAM, permissions boundaries, exact reviewed-plan promotion, budget controls, and fail-safe teardown. The live validation exercised commit `d0096e9536b3b77597fc820ac391abccb0951c09` through real AWS APPLY and deterministic DESTROY with empty-state verification; post-validation hardening commit `4361a69c54280537b1c8f1351eb2b4062b0dd257` is CI/static-validated only.
 
 ## 5-minute demonstration
 
@@ -26,7 +26,7 @@ Lead with the operating model rather than implementation details:
 ## Resume-ready bullets
 
 - Architected and validated a production-shaped financial-risk ML platform spanning point-in-time SEC data engineering, temporal model validation, PyTorch/TensorFlow experimentation, Terraform, AWS EKS, and governed CI/CD.
-- Implemented short-lived GitHub OIDC authentication, least-privilege IAM, per-role permissions boundaries, encrypted remote Terraform state with locking, and exact reviewed-plan promotion with independent SHA-256 verification.
+- Implemented short-lived GitHub OIDC authentication, scoped IAM, per-role permissions boundaries, encrypted remote Terraform state with locking, and exact reviewed-plan promotion with independent SHA-256 verification; completed a ~45-minute bounded AWS validation window with estimated runtime cost under $0.25.
 - Designed cost and failure controls combining AWS Budget alerts, bounded deployment leases, scheduled fail-safe teardown, deterministic DESTROY, and empty-state verification.
 - Built auditable model-evidence controls around SEC filing-date knowledge boundaries, complete outcome-window maturity, chronological evaluation, source hashing, and calibration reporting.
 - Drove iterative independent security/operations reviews to closure, converting findings into automated CI acceptance gates rather than relying on manual review alone.
