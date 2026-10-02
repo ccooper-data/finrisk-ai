@@ -1,25 +1,15 @@
 name: Deploy FinRisk Inference
 
+# Deploys to the private-only EKS API through the in-VPC CodeBuild projects in
+# infra/terraform/deploy_path.tf. The release role can start those two builds and set only
+# FINRISK_IMAGE_URI (a digest-pinned image in this account's repository); it cannot change what
+# they run. Rollout, readiness, smoke test and rollback happen inside the deploy buildspec.
 on:
   workflow_dispatch:
     inputs:
-      bounded_validation_override:
-        description: "Not authorized for private-only bounded validation; must remain false"
-        required: true
-        default: false
-        type: boolean
       image_tag:
-        description: "Immutable ECR image tag (must be sha-<40 hex commit>)"
+        description: "Image tag pushed by Build Inference Image (sha-<40 hex commit>)"
         required: true
-        type: string
-      cluster_name:
-        description: "Explicit bounded-validation EKS cluster name"
-        required: true
-        type: string
-      aws_region:
-        description: "AWS region"
-        required: true
-        default: "us-east-1"
         type: string
 
 permissions:
@@ -30,11 +20,18 @@ concurrency:
   group: finrisk-portfolio-deploy
   cancel-in-progress: false
 
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: finrisk-ai-inference
+  BOOTSTRAP_PROJECT: finrisk-ai-portfolio-k8s-bootstrap
+  DEPLOY_PROJECT: finrisk-ai-portfolio-k8s-deploy
+  EVIDENCE_FILE: evidence/deployment.txt
+
 jobs:
   deploy:
-    if: ${{ inputs.bounded_validation_override == true }}
-    environment: portfolio-validation
+    environment: portfolio-release
     runs-on: ubuntu-latest
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
 
@@ -49,71 +46,35 @@ jobs:
               raise SystemExit("image_tag must be immutable sha-<40 lowercase hex>")
           PY
 
-      - name: Configure short-lived AWS credentials
+      - name: Configure short-lived AWS credentials (release role)
         uses: aws-actions/configure-aws-credentials@v5
         with:
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ inputs.aws_region }}
+          role-to-assume: ${{ vars.AWS_RELEASE_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Resolve immutable ECR image digest
         id: image
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
-          repo="${{ vars.ECR_REPOSITORY }}"
-          digest="$(aws ecr describe-images --repository-name "$repo" --image-ids imageTag="$IMAGE_TAG" --query 'imageDetails[0].imageDigest' --output text)"
-          test -n "$digest" && test "$digest" != "None"
-          echo "uri=${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/$repo@$digest" >> "$GITHUB_OUTPUT"
-
-      - name: Configure kubeconfig
-        run: aws eks update-kubeconfig --name "${{ inputs.cluster_name }}" --region "${{ inputs.aws_region }}"
-
-      - name: Capture rollback target
-        id: previous
-        run: |
-          previous="$(kubectl -n finrisk get deployment finrisk-inference -o jsonpath='{.spec.template.spec.containers[0].image}')"
-          test -n "$previous"
-          echo "image=$previous" >> "$GITHUB_OUTPUT"
-
-      - name: Deploy exact image digest
-        id: rollout
-        continue-on-error: true
-        run: |
-          kubectl -n finrisk set image deployment/finrisk-inference inference="${{ steps.image.outputs.uri }}"
-          kubectl -n finrisk rollout status deployment/finrisk-inference --timeout=180s
-
-      - name: Verify readiness
-        id: readiness
-        if: steps.rollout.outcome == 'success'
-        continue-on-error: true
-        run: |
-          ready="$(kubectl -n finrisk get deployment finrisk-inference -o jsonpath='{.status.readyReplicas}')"
-          desired="$(kubectl -n finrisk get deployment finrisk-inference -o jsonpath='{.spec.replicas}')"
-          test "${ready:-0}" -ge "${desired:-1}"
-
-      - name: Roll back failed deployment
-        if: steps.rollout.outcome != 'success' || steps.readiness.outcome != 'success'
-        run: |
-          kubectl -n finrisk set image deployment/finrisk-inference inference="${{ steps.previous.outputs.image }}"
-          kubectl -n finrisk rollout status deployment/finrisk-inference --timeout=180s
-
-      - name: Fail after verified rollback
-        if: steps.rollout.outcome != 'success' || steps.readiness.outcome != 'success'
-        run: |
-          echo "Deployment failed and rollback was executed."
-          exit 1
-
-      - name: Record deployment evidence
-        if: success()
-        run: |
+          digest="$(aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$IMAGE_TAG" --query 'imageDetails[0].imageDigest' --output text)"
+          case "$digest" in (sha256:*) ;; (*) echo "could not resolve image digest for $IMAGE_TAG"; exit 1;; esac
+          account="$(aws sts get-caller-identity --query Account --output text)"
+          echo "uri=${account}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@$digest" >> "$GITHUB_OUTPUT"
           mkdir -p evidence
           {
             echo "git_sha=${GITHUB_SHA}"
-            echo "requested_tag=${{ inputs.image_tag }}"
-            echo "image_uri=${{ steps.image.outputs.uri }}"
-            echo "cluster=${{ inputs.cluster_name }}"
-            echo "deployment_revision=$(kubectl -n finrisk rollout history deployment/finrisk-inference | tail -n 1)"
-          } > evidence/deployment.txt
+            echo "requested_tag=${IMAGE_TAG}"
+            echo "image_uri=${account}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@$digest"
+          } > "$EVIDENCE_FILE"
+
+      # Fixed build with cluster scope; IAM denies every override for it.
+      - name: Bootstrap namespace
+        run: .github/scripts/run-codebuild.sh "$BOOTSTRAP_PROJECT"
+
+      # Namespace-scoped build; the image URI is the only value the caller supplies.
+      - name: Deploy digest-pinned image
+        run: .github/scripts/run-codebuild.sh "$DEPLOY_PROJECT" "FINRISK_IMAGE_URI=${{ steps.image.outputs.uri }}"
 
       - name: Upload deployment evidence
         if: always()

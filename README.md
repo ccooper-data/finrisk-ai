@@ -39,7 +39,7 @@ The portfolio cloud architecture has been exercised against a real AWS account, 
 - Cost controls combine AWS Budget alerts with a persisted teardown lease and an independent scheduled reaper.
 - Commit `d0096e9536b3b77597fc820ac391abccb0951c09` was exercised in the bounded live-AWS validation window: reviewed APPLY, reaper check, DESTROY, and final empty-state verification all completed successfully.
 - Post-validation hardening commit `4361a69c54280537b1c8f1351eb2b4062b0dd257` is CI/static-validated; it was not the commit exercised during the live AWS window.
-- Application deployment is intentionally out of scope for the private-only infrastructure validation window.
+- Application deployment to the private EKS API goes through in-VPC CodeBuild runners with namespace-scoped access and a pinned model. This path is CI/static-validated and has not yet been exercised in a live window.
 
 See [AWS validation closeout](docs/AWS_VALIDATION_CLOSEOUT.md) and [bounded AWS validation contract](docs/bounded-aws-validation.md).
 

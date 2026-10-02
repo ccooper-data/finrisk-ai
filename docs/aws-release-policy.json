@@ -1,0 +1,406 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EcrAuthorization",
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*"
+    },
+    {
+      "Sid": "PushInferenceImages",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchGetImage",
+        "ecr:CompleteLayerUpload",
+        "ecr:DescribeImages",
+        "ecr:InitiateLayerUpload",
+        "ecr:PutImage",
+        "ecr:UploadLayerPart"
+      ],
+      "Resource": "arn:aws:ecr:us-east-1:780976819607:repository/finrisk-ai-inference"
+    },
+    {
+      "Sid": "StartAndWatchK8sBuilds",
+      "Effect": "Allow",
+      "Action": [
+        "codebuild:StartBuild",
+        "codebuild:BatchGetBuilds"
+      ],
+      "Resource": [
+        "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-bootstrap",
+        "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-deploy"
+      ]
+    },
+    {
+      "Sid": "ReadK8sBuildLogs",
+      "Effect": "Allow",
+      "Action": "logs:GetLogEvents",
+      "Resource": "arn:aws:logs:us-east-1:780976819607:log-group:/finrisk/codebuild/finrisk-ai-portfolio:log-stream:*"
+    },
+    {
+      "Sid": "DeployAcceptsOnlyFinriskImageUri",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-deploy",
+      "Condition": {
+        "ForAnyValue:StringNotEquals": {
+          "codebuild:environment.environmentVariables.name": "FINRISK_IMAGE_URI"
+        }
+      }
+    },
+    {
+      "Sid": "DeployRequiresDigestPinnedImage",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-deploy",
+      "Condition": {
+        "StringNotLike": {
+          "codebuild:environment.environmentVariables/FINRISK_IMAGE_URI.value": "780976819607.dkr.ecr.us-east-1.amazonaws.com/finrisk-ai-inference@sha256:*"
+        }
+      }
+    },
+    {
+      "Sid": "BootstrapAcceptsNoEnvironmentVariables",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-bootstrap",
+      "Condition": {
+        "Null": {
+          "codebuild:environment.environmentVariables.name": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideSourceBuildspec",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:source.buildspec": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideSourceLocation",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:source.location": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideSourceAuthType",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:source.auth.type": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideSourceAuthResource",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:source.auth.resource": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideSourceInsecureSsl",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:source.insecureSsl": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideSourceBuildStatusConfigContext",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:source.buildStatusConfig.context": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideSourceBuildStatusConfigTargetUrl",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:source.buildStatusConfig.targetUrl": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideServiceRole",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:serviceRole": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideEnvironmentImage",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:environment.image": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideEnvironmentType",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:environment.type": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideEnvironmentComputeType",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:environment.computeType": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideEnvironmentPrivilegedMode",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:environment.privilegedMode": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideEnvironmentCertificate",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:environment.certificate": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideEnvironmentImagePullCredentialsType",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:environment.imagePullCredentialsType": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideEnvironmentRegistryCredentialCredential",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:environment.registryCredential.credential": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideEnvironmentRegistryCredentialCredentialProvider",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:environment.registryCredential.credentialProvider": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideEnvironmentFleetFleetArn",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:environment.fleet.fleetArn": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideArtifactsLocation",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:artifacts.location": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideArtifactsEncryptionDisabled",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:artifacts.encryptionDisabled": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideArtifactsBucketOwnerAccess",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:artifacts.bucketOwnerAccess": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideSecondaryArtifactsLocation",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:secondaryArtifacts.location": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideSecondarySourcesLocation",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:secondarySources.location": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideSecondarySourcesBuildspec",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:secondarySources.buildspec": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideCacheType",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:cache.type": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideCacheLocation",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:cache.location": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideCacheModes",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:cache.modes": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideLogsConfigS3LogsStatus",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:logsConfig.s3Logs.status": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideLogsConfigS3LogsLocation",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:logsConfig.s3Logs.location": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideEncryptionKey",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:encryptionKey": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyOverrideAutoRetryLimit",
+      "Effect": "Deny",
+      "Action": "codebuild:StartBuild",
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*",
+      "Condition": {
+        "Null": {
+          "codebuild:autoRetryLimit": "false"
+        }
+      }
+    }
+  ]
+}

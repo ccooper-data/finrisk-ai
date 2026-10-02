@@ -1,6 +1,6 @@
 # Bounded AWS EKS Validation Contract
 
-The bounded AWS validation window proves infrastructure provisioning and teardown, not application deployment.
+The first window (2026-10-02) proved infrastructure provisioning and teardown. The deploy path below adds application deployment to the private EKS API; it is CI/static-validated and has not yet been exercised in a live window.
 
 ## Success criteria
 
@@ -8,11 +8,34 @@ The bounded AWS validation window proves infrastructure provisioning and teardow
 - The EKS control plane reaches `ACTIVE`.
 - The managed node group reaches `ACTIVE`.
 - The EKS API remains private-only for this validation window.
+- The inference image is built from the pinned model and passes its local smoke test before it is pushed.
+- The deploy build rolls out the digest-pinned image, the pod is ready, and the in-pod smoke test returns a valid prediction from the pinned model.
 - Evidence is captured, then the environment is destroyed no later than the persisted teardown lease.
 
-## Out of scope
+## Deploy path
 
-`.github/workflows/deploy-inference.yml` is not authorized against the private-only bounded validation cluster. Application deployment requires a separately reviewed connectivity and access design.
+GitHub-hosted runners cannot reach the private EKS endpoint, so two CodeBuild projects run inside the private subnets (`infra/terraform/deploy_path.tf`). Their buildspecs are fixed by Terraform and reviewed with the plan.
+
+| Identity | Can do | Cannot do |
+|---|---|---|
+| `github-finrisk-deployer` (environment `portfolio-validation`) | Terraform lifecycle, including the CodeBuild projects and their roles | Start builds; associate any EKS access policy other than the two below |
+| `github-finrisk-releaser` (environment `portfolio-release`) | Push images to `finrisk-ai-inference`; start the two builds; read their logs | Change either project; override anything except `FINRISK_IMAGE_URI` on the deploy build |
+| `finrisk-ai-codebuild-bootstrap-*` | `AmazonEKSClusterAdminPolicy` (cluster scope); creates the `finrisk` namespace | Accept any caller-supplied variable |
+| `finrisk-ai-codebuild-deploy-*` | `AmazonEKSEditPolicy` scoped to `finrisk`: apply, roll out, exec smoke test, roll back | Create namespaces or touch other namespaces |
+
+The served model is pinned in `model/served-model.json` (source run, size, SHA-256). Changing it takes a reviewed commit.
+
+### One-time setup (administrator, before the next PLAN)
+
+1. Update `finrisk-ai-eks-boundary` to match `docs/aws-eks-boundary-policy.json`.
+2. Create the managed policy `finrisk-ai-deployer-deploy-path` from `docs/aws-deployer-deploy-path-policy.json` and attach it to `github-finrisk-deployer`.
+3. Create the role `github-finrisk-releaser` with trust policy `docs/aws-release-trust-policy.json` and inline policy `docs/aws-release-policy.json`.
+4. In GitHub, create the environment `portfolio-release` limited to `main`, with the variable `AWS_RELEASE_ROLE_ARN`.
+5. Optional, recommended: confirm with the IAM policy simulator that `StartBuild` requests carrying `BASH_ENV`, a buildspec override or an image override are denied, and that a request with only a digest-pinned `FINRISK_IMAGE_URI` is allowed.
+
+### Window sequence
+
+PLAN, review, APPLY the reviewed plan, then **Build Inference Image** (the ECR repository exists only while the stack is up), then **Deploy FinRisk Inference** with the image tag `sha-<commit>` from the build, then capture evidence and DESTROY.
 
 ## Cost enforcement
 

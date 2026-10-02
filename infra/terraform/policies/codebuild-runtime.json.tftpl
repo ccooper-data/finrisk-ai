@@ -1,0 +1,54 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "VpcNetworkInterfaces",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateNetworkInterface",
+        "ec2:DeleteNetworkInterface",
+        "ec2:DescribeDhcpOptions",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeVpcs"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "VpcNetworkInterfacePermission",
+      "Effect": "Allow",
+      "Action": "ec2:CreateNetworkInterfacePermission",
+      "Resource": "arn:aws:ec2:${region}:${account_id}:network-interface/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:AuthorizedService": "codebuild.amazonaws.com"
+        },
+        "ArnEquals": {
+          "ec2:Subnet": ${subnet_arns}
+        }
+      }
+    },
+    {
+      "Sid": "BuildLogGroup",
+      "Effect": "Allow",
+      "Action": "logs:CreateLogGroup",
+      "Resource": "arn:aws:logs:${region}:${account_id}:log-group:${log_group_name}"
+    },
+    {
+      "Sid": "BuildLogStreams",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:${region}:${account_id}:log-group:${log_group_name}:log-stream:*"
+    },
+    {
+      "Sid": "ReadClusterForKubeconfig",
+      "Effect": "Allow",
+      "Action": "eks:DescribeCluster",
+      "Resource": "${cluster_arn}"
+    }
+  ]
+}
