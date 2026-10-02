@@ -1,0 +1,86 @@
+name: Reap Expired AWS Validation
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: finrisk-bounded-aws-reaper
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  TF_DIR: infra/terraform
+  TF_STATE_KEY: finrisk-ai/portfolio/terraform.tfstate
+
+jobs:
+  reap:
+    environment: portfolio-validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Configure short-lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Initialize persistent Terraform state
+        run: |
+          terraform -chdir="$TF_DIR" init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=$TF_STATE_KEY" \
+            -backend-config="region=$AWS_REGION" \
+            -backend-config="dynamodb_table=${{ vars.TF_LOCK_TABLE }}" \
+            -backend-config="encrypt=true"
+
+      - name: Read teardown lease
+        id: lease
+        run: |
+          aws s3 cp "s3://${{ vars.TF_STATE_BUCKET }}/leases/bounded-validation-deadline.txt" deadline.txt
+          deadline="$(tr -d '\r\n' < deadline.txt)"
+          test -n "$deadline"
+          date -u -d "$deadline" +%s >/dev/null
+          echo "deadline=$deadline" >> "$GITHUB_OUTPUT"
+
+      - name: Inspect state
+        id: state
+        run: |
+          terraform -chdir="$TF_DIR" state list > state.txt
+          if test -s state.txt; then echo "nonempty=true" >> "$GITHUB_OUTPUT"; else echo "nonempty=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Destroy expired environment
+        if: steps.state.outputs.nonempty == 'true'
+        env:
+          TF_VAR_budget_alert_email: ${{ secrets.BUDGET_ALERT_EMAIL }}
+          DEADLINE: ${{ steps.lease.outputs.deadline }}
+        run: |
+          now="$(date -u +%s)"
+          expires="$(date -u -d "$DEADLINE" +%s)"
+          if [ "$now" -lt "$expires" ]; then
+            echo "Lease remains active until $DEADLINE"
+            exit 0
+          fi
+          terraform -chdir="$TF_DIR" destroy -auto-approve \
+            -var="aws_region=$AWS_REGION" \
+            -var="monthly_budget_limit_usd=100" \
+            -var="enable_eks=true" \
+            -var="enable_nat_gateway=true" \
+            -var="enable_observability=true" \
+            -var="enable_audit_trail=true"
+          remaining="$(terraform -chdir="$TF_DIR" state list)"
+          test -z "$remaining"
+
+      - name: Clear lease after empty state
+        if: steps.state.outputs.nonempty == 'false'
+        run: aws s3 rm "s3://${{ vars.TF_STATE_BUCKET }}/leases/bounded-validation-deadline.txt"
