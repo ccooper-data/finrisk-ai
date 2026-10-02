@@ -30,7 +30,9 @@ env:
   AWS_REGION: us-east-1
   TF_DIR: infra/terraform
   TF_STATE_KEY: finrisk-ai/portfolio/terraform.tfstate
-  VALIDATION_MAX_HOURS: "6"
+  # The reaper runs at most hourly and destroy takes ~15-20 min, so a 4h lease keeps
+  # unattended teardown inside the 6h validation window.
+  VALIDATION_MAX_HOURS: "4"
 
 jobs:
   execute:
@@ -48,6 +50,9 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+          # EKS create/delete can approach the 1h default; credentials are not refreshed mid-step.
+          # Requires the role's MaxSessionDuration to be at least 7200.
+          role-duration-seconds: 7200
 
       - name: Verify AWS identity
         run: aws sts get-caller-identity
@@ -141,7 +146,7 @@ jobs:
 
       - name: Apply exact reviewed binary plan
         if: inputs.action == 'apply-reviewed-plan'
-        run: terraform -chdir="$TF_DIR" apply -auto-approve bounded-validation.tfplan
+        run: terraform -chdir="$TF_DIR" apply -lock-timeout=10m -auto-approve bounded-validation.tfplan
 
       - name: Record provisioned outputs
         if: inputs.action == 'apply-reviewed-plan'
@@ -162,7 +167,7 @@ jobs:
         env:
           TF_VAR_budget_alert_email: ${{ secrets.BUDGET_ALERT_EMAIL }}
         run: |
-          terraform -chdir="$TF_DIR" destroy -auto-approve \
+          terraform -chdir="$TF_DIR" destroy -auto-approve -lock-timeout=10m \
             -var="aws_region=$AWS_REGION" \
             -var="monthly_budget_limit_usd=100" \
             -var="enable_eks=true" \
@@ -179,3 +184,9 @@ jobs:
             printf '%s\n' "$remaining"
             exit 1
           }
+
+      # Runs only after state is verified empty, so the reaper's fail-safe still covers a
+      # partial destroy.
+      - name: Clear teardown lease after verified destroy
+        if: inputs.action == 'destroy'
+        run: aws s3 rm "s3://${{ vars.TF_STATE_BUCKET }}/leases/bounded-validation-deadline.txt"

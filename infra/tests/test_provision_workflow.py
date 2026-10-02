@@ -31,7 +31,7 @@ checks = {
         and "reviewed-plan-evidence/bounded-validation.tfplan.sha256" in workflow,
     "plan checksum verified": "sha256sum -c bounded-validation.tfplan.sha256" in workflow,
     "latest source-run attempt checked": ".run_attempt" in workflow and "/attempts/${attempt}/jobs" in workflow,
-    "apply exact binary only": "apply -auto-approve bounded-validation.tfplan" in workflow,
+    "apply exact binary only": "apply -lock-timeout=10m -auto-approve bounded-validation.tfplan" in workflow,
     "destroy action exists": "inputs.action == 'destroy'" in workflow and "destroy -auto-approve" in workflow,
     "destroy verifies empty state": "state list" in workflow,
     "region pinned": "AWS_REGION: us-east-1" in workflow and "aws_region:" not in workflow.split("permissions:")[0],

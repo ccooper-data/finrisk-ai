@@ -37,6 +37,6 @@ resource "aws_budgets_budget" "portfolio" {
 check "portfolio_budget_ceiling" {
   assert {
     condition     = var.monthly_budget_limit_usd <= 100
-    error_message = "Deployment blocked: requested budget exceeds the FinRisk-AI $100 hard ceiling."
+    error_message = "Deployment blocked: requested budget exceeds the FinRisk-AI $100 budget cap."
   }
 }

@@ -19,6 +19,12 @@
       ]
     },
     {
+      "Sid": "DenyTerraformStateObjectDeletion",
+      "Effect": "Deny",
+      "Action": "s3:DeleteObject",
+      "Resource": "arn:aws:s3:::finrisk-tfstate-*/finrisk-ai/portfolio/terraform.tfstate"
+    },
+    {
       "Sid": "DenyBootstrapRoleSelfModification",
       "Effect": "Deny",
       "Action": [
@@ -189,6 +195,12 @@
         "arn:aws:iam::*:role/finrisk-ai-eks-cluster-*",
         "arn:aws:iam::*:role/finrisk-ai-eks-nodes-*"
       ]
+    },
+    {
+      "Sid": "DetachNodeRoleFromLeftoverEKSInstanceProfile",
+      "Effect": "Allow",
+      "Action": "iam:RemoveRoleFromInstanceProfile",
+      "Resource": "arn:aws:iam::780976819607:instance-profile/eks-*"
     },
     {
       "Sid": "AttachApprovedClusterPolicy",

@@ -8,7 +8,11 @@ on:
       - "infra/tests/**"
       - ".github/workflows/terraform-validate.yml"
       - ".github/workflows/provision-bounded-aws.yml"
+      - ".github/workflows/reap-bounded-aws.yml"
       - ".github/workflows/deploy-inference.yml"
+      - "docs/aws-bootstrap-policy.json"
+      - "docs/aws-bootstrap-trust-policy.json"
+      - "docs/aws-eks-boundary-policy.json"
   workflow_dispatch:
 
 permissions:
@@ -63,6 +67,8 @@ jobs:
         run: python infra/tests/test_plan_review_hardening.py
       - name: Second review hardening acceptance
         run: python infra/tests/test_second_review_hardening.py
+      - name: Post-validation hardening acceptance
+        run: python infra/tests/test_post_validation_hardening.py
       - name: Cloud security acceptance
         run: python infra/tests/test_security_foundation.py
       - name: Observability and SLO acceptance

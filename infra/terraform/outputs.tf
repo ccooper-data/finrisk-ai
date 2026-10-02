@@ -3,8 +3,8 @@ output "budget_name" {
   value       = aws_budgets_budget.portfolio.name
 }
 
-output "hard_ceiling_usd" {
-  description = "Maximum permitted monthly budget value for this portfolio environment."
+output "budget_alert_limit_usd" {
+  description = "Monthly AWS Budget limit that alerts are measured against. Alerts only; it does not stop spend."
   value       = var.monthly_budget_limit_usd
 }
 

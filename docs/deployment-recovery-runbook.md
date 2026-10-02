@@ -5,7 +5,7 @@ This runbook governs the bounded FinRisk-AI EKS validation deployment. It proves
 
 ## Preconditions
 - Phase 1–6 acceptance gates are green on the commit being promoted.
-- AWS Budget hard ceiling remains $100 and current spend leaves adequate headroom.
+- AWS Budget alert limit remains capped at $100 (alerts only) and current spend leaves adequate headroom.
 - EKS and required NAT/observability resources are enabled only for the validation window.
 - The candidate image exists in ECR under an immutable sha-<40 hex> tag.
 - GitHub environment portfolio-validation has the required deployment variables.
