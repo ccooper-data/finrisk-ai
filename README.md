@@ -70,4 +70,6 @@ Both promoted nonlinear models improved probability-quality metrics over their v
 
 Earlier experimental figures from pre-repair sequence ordering or incomplete outcome windows are superseded and are not Version 1 performance claims.
 
-See [docs/V1_MODEL_CARD.md](docs/V1_MODEL_CARD.md) for the evidence scope, limitations, and interpretation.\n\nFor a fast review: [Version 1 results](docs/RESULTS.md) · [engineering rigor case study](docs/CASE_STUDY.md) · [5–10 minute demo guide](docs/DEMO_GUIDE.md).
+See [docs/V1_MODEL_CARD.md](docs/V1_MODEL_CARD.md) for the evidence scope, limitations, and interpretation.
+
+For a fast review: [Version 1 results](docs/RESULTS.md) · [engineering rigor case study](docs/CASE_STUDY.md) · [5–10 minute demo guide](docs/DEMO_GUIDE.md).

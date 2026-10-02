@@ -14,7 +14,8 @@ FinRisk-AI completed its bounded real-AWS infrastructure validation on 2026-10-0
 | Reaper validation | Reaper run `37016087352`, attempt 2, completed successfully while the lease remained active |
 | Deterministic teardown | DESTROY run `37032984694` completed successfully |
 | Empty-state verification | The final `Verify destroy state` step in run `37032984694` passed |
-| Live validation commit | `d0096e9536b3b77597fc820ac391abccb0951c09` — the commit exercised by PLAN/APPLY/reaper/DESTROY |\n| Post-validation hardening | `4361a69c54280537b1c8f1351eb2b4062b0dd257` — CI/static-validated only; not exercised in the live window |
+| Live validation commit | `d0096e9536b3b77597fc820ac391abccb0951c09` — the commit exercised by PLAN/APPLY/reaper/DESTROY |
+| Post-validation hardening | `4361a69c54280537b1c8f1351eb2b4062b0dd257` — CI/static-validated only; not exercised in the live window |
 
 ## Security and governance controls demonstrated
 
