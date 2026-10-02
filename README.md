@@ -28,6 +28,21 @@ SEC fundamentals ──> point-in-time observation ──> maturity gate ──>
 Exploratory extensions: FRED/ALFRED macro context and market-behavior contracts.
 ```
 
+## Validated AWS lifecycle
+
+The portfolio cloud architecture has been exercised against a real AWS account, not only statically planned.
+
+- GitHub Actions authenticates to AWS through short-lived OIDC credentials; no long-lived AWS key is stored in the repository.
+- Terraform state is remote, encrypted, versioned, and lock-protected.
+- Deployment promotion applies the exact reviewed binary plan after provenance and SHA-256 verification.
+- EKS uses a private API endpoint, scoped bootstrap permissions, and per-role permissions boundaries.
+- Cost controls combine AWS Budget alerts with a persisted teardown lease and an independent scheduled reaper.
+- Commit `d0096e9536b3b77597fc820ac391abccb0951c09` was exercised in the bounded live-AWS validation window: reviewed APPLY, reaper check, DESTROY, and final empty-state verification all completed successfully.
+- Post-validation hardening commit `4361a69c54280537b1c8f1351eb2b4062b0dd257` is CI/static-validated; it was not the commit exercised during the live AWS window.
+- Application deployment is intentionally out of scope for the private-only infrastructure validation window.
+
+See [AWS validation closeout](docs/AWS_VALIDATION_CLOSEOUT.md) and [bounded AWS validation contract](docs/bounded-aws-validation.md).
+
 ## Leakage controls
 
 Every historical observation is bounded by its SEC filing date. Future filings, post-cutoff prices, later macro revisions, and future distress events cannot enter model features. Primary evaluation uses chronological train/validation/test partitions.
@@ -55,4 +70,6 @@ Both promoted nonlinear models improved probability-quality metrics over their v
 
 Earlier experimental figures from pre-repair sequence ordering or incomplete outcome windows are superseded and are not Version 1 performance claims.
 
-See [docs/V1_MODEL_CARD.md](docs/V1_MODEL_CARD.md) for the evidence scope, limitations, and interpretation.\n\nFor a fast review: [Version 1 results](docs/RESULTS.md) · [engineering rigor case study](docs/CASE_STUDY.md) · [5–10 minute demo guide](docs/DEMO_GUIDE.md).
+See [docs/V1_MODEL_CARD.md](docs/V1_MODEL_CARD.md) for the evidence scope, limitations, and interpretation.
+
+For a fast review: [Version 1 results](docs/RESULTS.md) · [engineering rigor case study](docs/CASE_STUDY.md) · [5–10 minute demo guide](docs/DEMO_GUIDE.md).
