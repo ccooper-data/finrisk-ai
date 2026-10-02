@@ -1,0 +1,43 @@
+version: 0.2
+
+# Namespace bootstrap. Runs as a role holding AmazonEKSClusterAdminPolicy (cluster scope),
+# because only cluster admin can create namespaces. This file is fixed by Terraform and reviewed
+# with the plan. The release role's IAM denies every StartBuild override that has a condition
+# key, including any environment override. Timeout and debug-session overrides have no key;
+# debug sessions cannot connect because this role has no ssmmessages permissions.
+
+env:
+  shell: bash
+
+phases:
+  build:
+    commands:
+      - |
+        set -euo pipefail
+
+        # Pinned kubectl (within one minor version of the cluster), verified against a
+        # checksum fixed in this file rather than one fetched from the same origin.
+        mkdir -p /opt/finrisk/bin
+        curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/${kubectl_version}/bin/linux/amd64/kubectl"
+        echo "${kubectl_sha256}  /tmp/kubectl" | sha256sum --check --strict
+        install -m 0755 /tmp/kubectl /opt/finrisk/bin/kubectl
+        K=/opt/finrisk/bin/kubectl
+        "$K" version --client
+
+        aws eks update-kubeconfig --name "${cluster_name}" --region "${region}"
+
+        # Access entries are eventually consistent; wait until this role is authorized.
+        for attempt in 1 2 3 4 5 6 7 8 9 10; do
+          if [ "$("$K" auth can-i create namespaces 2>/dev/null)" = "yes" ]; then break; fi
+          if [ "$attempt" = 10 ]; then echo "bootstrap role is not authorized on the cluster"; exit 1; fi
+          sleep 6
+        done
+
+        # Idempotent: a retry is not an exceptional path.
+        "$K" create namespace "${namespace}" --dry-run=client -o yaml | "$K" apply -f -
+        # Pod Security Admission: the inference pod already meets the restricted profile.
+        "$K" label namespace "${namespace}" --overwrite \
+          pod-security.kubernetes.io/enforce=restricted \
+          pod-security.kubernetes.io/enforce-version=latest
+
+        echo "FINRISK_EVIDENCE bootstrap=complete namespace=${namespace}"

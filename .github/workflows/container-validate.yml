@@ -5,6 +5,8 @@ on:
     paths:
       - "Dockerfile"
       - ".dockerignore"
+      - "constraints/**"
+      - "model/**"
       - "pyproject.toml"
       - "src/**"
       - "tests/test_serving.py"

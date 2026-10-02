@@ -1,119 +1,113 @@
 name: Deploy FinRisk Inference
 
+# Deploys to the private-only EKS API through the in-VPC CodeBuild projects in
+# infra/terraform/deploy_path.tf. The release role can start those two builds and set only
+# FINRISK_IMAGE_URI (a digest-pinned image in this account's repository); it cannot change what
+# they run. Rollout, readiness, smoke test and rollback happen inside the deploy buildspec.
+#
+# There is no image input: it deploys the image Build Inference Image pushed for this same
+# commit. The deploy buildspec's expected model SHA-256 was fixed at PLAN time, and main stays
+# frozen from PLAN to DESTROY, so image, pin and plan all come from one commit.
 on:
   workflow_dispatch:
-    inputs:
-      bounded_validation_override:
-        description: "Not authorized for private-only bounded validation; must remain false"
-        required: true
-        default: false
-        type: boolean
-      image_tag:
-        description: "Immutable ECR image tag (must be sha-<40 hex commit>)"
-        required: true
-        type: string
-      cluster_name:
-        description: "Explicit bounded-validation EKS cluster name"
-        required: true
-        type: string
-      aws_region:
-        description: "AWS region"
-        required: true
-        default: "us-east-1"
-        type: string
 
 permissions:
   contents: read
   id-token: write
 
+# Shares the provision workflow's group so a DESTROY never runs under an in-VPC build.
 concurrency:
-  group: finrisk-portfolio-deploy
+  group: finrisk-bounded-aws-validation
   cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: finrisk-ai-inference
+  BOOTSTRAP_PROJECT: finrisk-ai-portfolio-k8s-bootstrap
+  DEPLOY_PROJECT: finrisk-ai-portfolio-k8s-deploy
+  EVIDENCE_FILE: evidence/deployment.txt
 
 jobs:
   deploy:
-    if: ${{ inputs.bounded_validation_override == true }}
-    environment: portfolio-validation
+    environment: portfolio-release
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate immutable image identity
-        env:
-          IMAGE_TAG: ${{ inputs.image_tag }}
+      - name: Image tag for this commit
+        id: tag
         run: |
-          python - <<'PY'
-          import os, re
-          tag = os.environ["IMAGE_TAG"]
-          if not re.fullmatch(r"sha-[0-9a-f]{40}", tag):
-              raise SystemExit("image_tag must be immutable sha-<40 lowercase hex>")
-          PY
+          tag="sha-${GITHUB_SHA}"
+          [[ "$tag" =~ ^sha-[0-9a-f]{40}$ ]] || { echo "unexpected commit SHA"; exit 1; }
+          echo "value=$tag" >> "$GITHUB_OUTPUT"
 
-      - name: Configure short-lived AWS credentials
+      - name: Configure short-lived AWS credentials (release role)
         uses: aws-actions/configure-aws-credentials@v5
         with:
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ inputs.aws_region }}
+          role-to-assume: ${{ vars.AWS_RELEASE_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          # Both builds can take up to 65 minutes; requires the role's MaxSessionDuration >= 7200.
+          role-duration-seconds: 7200
 
       - name: Resolve immutable ECR image digest
         id: image
         env:
-          IMAGE_TAG: ${{ inputs.image_tag }}
+          IMAGE_TAG: ${{ steps.tag.outputs.value }}
         run: |
-          repo="${{ vars.ECR_REPOSITORY }}"
-          digest="$(aws ecr describe-images --repository-name "$repo" --image-ids imageTag="$IMAGE_TAG" --query 'imageDetails[0].imageDigest' --output text)"
-          test -n "$digest" && test "$digest" != "None"
-          echo "uri=${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/$repo@$digest" >> "$GITHUB_OUTPUT"
-
-      - name: Configure kubeconfig
-        run: aws eks update-kubeconfig --name "${{ inputs.cluster_name }}" --region "${{ inputs.aws_region }}"
-
-      - name: Capture rollback target
-        id: previous
-        run: |
-          previous="$(kubectl -n finrisk get deployment finrisk-inference -o jsonpath='{.spec.template.spec.containers[0].image}')"
-          test -n "$previous"
-          echo "image=$previous" >> "$GITHUB_OUTPUT"
-
-      - name: Deploy exact image digest
-        id: rollout
-        continue-on-error: true
-        run: |
-          kubectl -n finrisk set image deployment/finrisk-inference inference="${{ steps.image.outputs.uri }}"
-          kubectl -n finrisk rollout status deployment/finrisk-inference --timeout=180s
-
-      - name: Verify readiness
-        id: readiness
-        if: steps.rollout.outcome == 'success'
-        continue-on-error: true
-        run: |
-          ready="$(kubectl -n finrisk get deployment finrisk-inference -o jsonpath='{.status.readyReplicas}')"
-          desired="$(kubectl -n finrisk get deployment finrisk-inference -o jsonpath='{.spec.replicas}')"
-          test "${ready:-0}" -ge "${desired:-1}"
-
-      - name: Roll back failed deployment
-        if: steps.rollout.outcome != 'success' || steps.readiness.outcome != 'success'
-        run: |
-          kubectl -n finrisk set image deployment/finrisk-inference inference="${{ steps.previous.outputs.image }}"
-          kubectl -n finrisk rollout status deployment/finrisk-inference --timeout=180s
-
-      - name: Fail after verified rollback
-        if: steps.rollout.outcome != 'success' || steps.readiness.outcome != 'success'
-        run: |
-          echo "Deployment failed and rollback was executed."
-          exit 1
-
-      - name: Record deployment evidence
-        if: success()
-        run: |
+          digest="$(aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$IMAGE_TAG" --query 'imageDetails[0].imageDigest' --output text)"
+          case "$digest" in (sha256:*) ;; (*) echo "no image for $IMAGE_TAG; run Build Inference Image on this commit first"; exit 1;; esac
+          account="$(aws sts get-caller-identity --query Account --output text)"
+          echo "uri=${account}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@$digest" >> "$GITHUB_OUTPUT"
           mkdir -p evidence
           {
             echo "git_sha=${GITHUB_SHA}"
-            echo "requested_tag=${{ inputs.image_tag }}"
-            echo "image_uri=${{ steps.image.outputs.uri }}"
-            echo "cluster=${{ inputs.cluster_name }}"
-            echo "deployment_revision=$(kubectl -n finrisk rollout history deployment/finrisk-inference | tail -n 1)"
-          } > evidence/deployment.txt
+            echo "requested_tag=${IMAGE_TAG}"
+            echo "image_uri=${account}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@$digest"
+          } > "$EVIDENCE_FILE"
+
+      # Fixed build with cluster scope; IAM denies every override for it.
+      - name: Bootstrap namespace
+        env:
+          CODEBUILD_WAIT_MINUTES: "30"
+          EVIDENCE_TERMINAL: "bootstrap=complete"
+        run: exec .github/scripts/run-codebuild.sh "$BOOTSTRAP_PROJECT"
+
+      # Namespace-scoped build; the image URI is the only value the caller supplies.
+      - name: Deploy digest-pinned image
+        env:
+          CODEBUILD_WAIT_MINUTES: "45"
+          EVIDENCE_TERMINAL: "result="
+        run: exec .github/scripts/run-codebuild.sh "$DEPLOY_PROJECT" "FINRISK_IMAGE_URI=${{ steps.image.outputs.uri }}"
+
+      # The build steps exec the runner script so a cancel reaches its stop-build trap, but the
+      # runner kills a cancelled step 10 seconds after signalling it. This step stops any build
+      # still without a final status and waits for the stop while the job holds the concurrency
+      # group, so a queued DESTROY cannot start under it. Bounded to end inside GitHub's 5-minute
+      # cancellation timeout.
+      - name: Stop unfinished builds
+        if: failure() || cancelled()
+        timeout-minutes: 4
+        run: |
+          [ -f "$EVIDENCE_FILE" ] || exit 0
+          for id in $(sed -n 's/^[a-z0-9-]*_build_id=//p' "$EVIDENCE_FILE"); do
+            project="${id%%:*}"
+            grep -q "^${project}_status=" "$EVIDENCE_FILE" && continue
+            echo "::warning::Stopping $id"
+            aws codebuild stop-build --id "$id" >/dev/null || true
+            deadline=$((SECONDS + 180))
+            while :; do
+              status="$(aws codebuild batch-get-builds --ids "$id" --query 'builds[0].buildStatus' --output text)" || status=UNKNOWN
+              [ "$status" != IN_PROGRESS ] && [ "$status" != UNKNOWN ] && break
+              [ "$SECONDS" -lt "$deadline" ] || break
+              sleep 5
+            done
+            echo "${project}_status_after_stop=$status" >> "$EVIDENCE_FILE"
+            if [ "$status" = IN_PROGRESS ] || [ "$status" = UNKNOWN ]; then
+              echo "::error::$id may still be running; do not DESTROY until it has stopped"
+              exit 1
+            fi
+          done
 
       - name: Upload deployment evidence
         if: always()

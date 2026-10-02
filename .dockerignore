@@ -5,5 +5,7 @@ __pycache__
 *.pyc
 data/
 artifacts/
-*.joblib
+**/*.joblib
+# The reviewed serving artifact is the one model file allowed into the image.
+!model/boosted_tree_model.joblib
 .env

@@ -23,11 +23,11 @@ Status vocabulary:
 | OpenTelemetry instrumentation | observability acceptance | VALIDATED |
 | SLO/alert definitions | docs + Terraform + acceptance | VALIDATED |
 | Digest-pinned deployment | delivery workflow + acceptance | VALIDATED |
-| Rollback control flow | delivery workflow + acceptance | VALIDATED |
+| Rollback control flow | deploy buildspec run against a fake kubectl + acceptance | VALIDATED |
 | Live EKS scheduling | bounded AWS run required | IMPLEMENTED / LIVE VALIDATION PENDING |
 | Live HPA scale-out | bounded load test required | IMPLEMENTED / LIVE VALIDATION PENDING |
 | Live CloudWatch telemetry | bounded AWS run required | IMPLEMENTED / LIVE VALIDATION PENDING |
-| Live failed-deploy rollback | bounded AWS failure injection required | IMPLEMENTED / LIVE VALIDATION PENDING |
+| Live failed-deploy rollback | not exercisable in a bounded window: the controlled deploy cannot ship a non-ready candidate; needs a reviewed failure-injection mechanism | IMPLEMENTED / LIVE VALIDATION PENDING |
 | Live teardown/cost evidence | bounded AWS run + destroy required | IMPLEMENTED / LIVE VALIDATION PENDING |
 
 ## Final acceptance rule
@@ -36,3 +36,5 @@ The repository may be described as a **production-shaped AWS platform implementa
 The project reaches portfolio-complete status only after either:
 1. the bounded live validation is executed successfully under the $100 ceiling and teardown is verified, or
 2. portfolio materials explicitly preserve the live-validation-pending limitation rather than implying those tests occurred.
+
+Live failed-deploy rollback is outside the bounded window (`docs/live-aws-validation-plan.md`, step 4), so it stays pending after a successful window and portfolio materials keep that limitation either way.

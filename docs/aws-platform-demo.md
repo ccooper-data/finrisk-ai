@@ -18,7 +18,7 @@ Show the hardened Deployment, readiness/liveness probes, resource requests/limit
 Show OpenTelemetry counters/traces/latency, CloudWatch alarm definitions, and the runtime SLO document. State clearly that 99.9% is an objective for a validation window, not a historical uptime claim.
 
 ### 6. Failure and recovery — 120 seconds
-Show: candidate digest -> capture previous image -> deploy -> rollout/readiness check -> rollback on failure -> verify rollback -> preserve failed status.
+Show: candidate digest -> record current revision -> server-side apply -> rollout/readiness check -> in-pod smoke test against the pinned model -> on failure, undo to the recorded revision (or delete a failed first deploy) -> verify rollback -> preserve failed status.
 
 Leadership point: recovery success does not convert a failed change into a successful change; the failed deployment remains visible for investigation.
 

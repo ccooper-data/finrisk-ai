@@ -1,0 +1,158 @@
+{
+ "actions": {
+  "CreatePolicyVersion": {
+   "condition_keys": [],
+   "resource_condition_keys": [
+    "aws:ResourceTag/${TagKey}"
+   ],
+   "resources": [
+    "policy"
+   ]
+  },
+  "CreateRole": {
+   "condition_keys": [
+    "aws:RequestTag/${TagKey}",
+    "aws:TagKeys",
+    "iam:PermissionsBoundary",
+    "iam:RoleTemplateARN"
+   ],
+   "resource_condition_keys": [
+    "aws:ResourceTag/${TagKey}",
+    "iam:ResourceTag/${TagKey}"
+   ],
+   "resources": [
+    "role"
+   ]
+  },
+  "DeletePolicy": {
+   "condition_keys": [],
+   "resource_condition_keys": [
+    "aws:ResourceTag/${TagKey}"
+   ],
+   "resources": [
+    "policy"
+   ]
+  },
+  "DeletePolicyVersion": {
+   "condition_keys": [],
+   "resource_condition_keys": [
+    "aws:ResourceTag/${TagKey}"
+   ],
+   "resources": [
+    "policy"
+   ]
+  },
+  "DeleteRole": {
+   "condition_keys": [
+    "iam:PermissionsBoundary"
+   ],
+   "resource_condition_keys": [
+    "aws:ResourceTag/${TagKey}",
+    "iam:ResourceTag/${TagKey}"
+   ],
+   "resources": [
+    "role"
+   ]
+  },
+  "DeleteRolePermissionsBoundary": {
+   "condition_keys": [
+    "iam:PermissionsBoundary"
+   ],
+   "resource_condition_keys": [
+    "aws:ResourceTag/${TagKey}",
+    "iam:ResourceTag/${TagKey}"
+   ],
+   "resources": [
+    "role"
+   ]
+  },
+  "DeleteRolePolicy": {
+   "condition_keys": [
+    "iam:PermissionsBoundary"
+   ],
+   "resource_condition_keys": [
+    "aws:ResourceTag/${TagKey}",
+    "iam:ResourceTag/${TagKey}"
+   ],
+   "resources": [
+    "role"
+   ]
+  },
+  "PassRole": {
+   "condition_keys": [
+    "iam:AssociatedResourceArn",
+    "iam:PassedToService"
+   ],
+   "resource_condition_keys": [
+    "aws:ResourceTag/${TagKey}",
+    "iam:ResourceTag/${TagKey}"
+   ],
+   "resources": [
+    "role"
+   ]
+  },
+  "PutRolePermissionsBoundary": {
+   "condition_keys": [
+    "iam:PermissionsBoundary",
+    "iam:RoleTemplateARN"
+   ],
+   "resource_condition_keys": [
+    "aws:ResourceTag/${TagKey}",
+    "iam:ResourceTag/${TagKey}"
+   ],
+   "resources": [
+    "role"
+   ]
+  },
+  "PutRolePolicy": {
+   "condition_keys": [
+    "iam:PermissionsBoundary",
+    "iam:RoleTemplateARN"
+   ],
+   "resource_condition_keys": [
+    "aws:ResourceTag/${TagKey}",
+    "iam:ResourceTag/${TagKey}"
+   ],
+   "resources": [
+    "role"
+   ]
+  },
+  "SetDefaultPolicyVersion": {
+   "condition_keys": [],
+   "resource_condition_keys": [
+    "aws:ResourceTag/${TagKey}"
+   ],
+   "resources": [
+    "policy"
+   ]
+  },
+  "TagRole": {
+   "condition_keys": [
+    "aws:RequestTag/${TagKey}",
+    "aws:TagKeys",
+    "iam:RoleTemplateARN"
+   ],
+   "resource_condition_keys": [
+    "aws:ResourceTag/${TagKey}",
+    "iam:ResourceTag/${TagKey}"
+   ],
+   "resources": [
+    "role"
+   ]
+  },
+  "UntagRole": {
+   "condition_keys": [
+    "aws:TagKeys"
+   ],
+   "resource_condition_keys": [
+    "aws:ResourceTag/${TagKey}",
+    "iam:ResourceTag/${TagKey}"
+   ],
+   "resources": [
+    "role"
+   ]
+  }
+ },
+ "retrieved": "2026-10-02",
+ "source": "https://servicereference.us-east-1.amazonaws.com/v1/iam/iam.json"
+}

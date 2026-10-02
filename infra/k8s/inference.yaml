@@ -1,15 +1,13 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: finrisk
----
+# Applied by the deploy CodeBuild project, whose access is AmazonEKSEditPolicy scoped to the
+# finrisk namespace. The namespace itself is created by the bootstrap project (cluster scope).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: finrisk-inference
   namespace: finrisk
 spec:
-  replicas: 1
+  # No spec.replicas: the HPA owns the replica count, and re-applying a fixed value would fight it.
+  progressDeadlineSeconds: 240
   selector:
     matchLabels:
       app: finrisk-inference
@@ -18,10 +16,19 @@ spec:
       labels:
         app: finrisk-inference
     spec:
+      # The app never calls the Kubernetes API.
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
+      volumes:
+        # Writable scratch space; the root filesystem is read-only.
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
       containers:
         - name: inference
           image: FINRISK_IMAGE_PLACEHOLDER
@@ -33,6 +40,9 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
               cpu: 100m

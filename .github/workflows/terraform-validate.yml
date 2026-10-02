@@ -13,6 +13,16 @@ on:
       - "docs/aws-bootstrap-policy.json"
       - "docs/aws-bootstrap-trust-policy.json"
       - "docs/aws-eks-boundary-policy.json"
+      - "docs/aws-release-policy.json"
+      - "docs/aws-release-trust-policy.json"
+      - "docs/aws-deployer-deploy-path-policy.json"
+      - ".github/workflows/build-inference-image.yml"
+      - ".github/scripts/**"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "constraints/**"
+      - "model/**"
+      - "pyproject.toml"
   workflow_dispatch:
 
 permissions:
@@ -26,6 +36,11 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.9.8"
+      # The acceptance scripts need PyYAML. Install it from pyproject like ci.yml, on the same
+      # interpreter, rather than relying on whatever the runner image's system Python carries.
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: pip install -e '.[dev]'
       - name: Terraform format
         run: |
           terraform -chdir=infra/terraform fmt -recursive
@@ -69,12 +84,20 @@ jobs:
         run: python infra/tests/test_second_review_hardening.py
       - name: Post-validation hardening acceptance
         run: python infra/tests/test_post_validation_hardening.py
+      - name: EKS deploy path acceptance
+        run: python infra/tests/test_eks_deploy_path.py
+      - name: Deploy buildspec runtime acceptance
+        run: python infra/tests/test_deploy_buildspec_runtime.py
+      - name: Inference image acceptance
+        run: python infra/tests/test_inference_image.py
       - name: Cloud security acceptance
         run: python infra/tests/test_security_foundation.py
       - name: Observability and SLO acceptance
         run: python infra/tests/test_observability_foundation.py
       - name: Delivery and rollback acceptance
         run: python infra/tests/test_delivery_recovery.py
+      - name: CodeBuild runner script runtime acceptance
+        run: python infra/tests/test_run_codebuild_runtime.py
       - name: Final QA evidence acceptance
         run: python infra/tests/test_final_qa_evidence.py
       - name: Live validation harness safety

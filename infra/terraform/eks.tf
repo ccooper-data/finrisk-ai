@@ -49,11 +49,21 @@ resource "aws_eks_cluster" "platform" {
     support_type = "STANDARD"
   }
 
+  # Access entries only, and no implicit cluster admin for the Terraform caller: Kubernetes
+  # access is granted explicitly in deploy_path.tf. bootstrap_cluster_creator_admin_permissions
+  # is create-only (ForceNew); every validation window creates a fresh cluster.
+  access_config {
+    authentication_mode                         = "API"
+    bootstrap_cluster_creator_admin_permissions = false
+  }
+
   vpc_config {
     subnet_ids              = aws_subnet.private[*].id
     endpoint_private_access = true
     endpoint_public_access  = length(var.eks_public_access_cidrs) > 0
     public_access_cidrs     = var.eks_public_access_cidrs
+    # Control-plane ENIs only; carries the CodeBuild runner ingress rule.
+    security_group_ids = [aws_security_group.eks_api[0].id]
   }
 
   lifecycle {

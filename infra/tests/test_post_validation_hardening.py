@@ -57,6 +57,10 @@ checks={
    and "TF_STATE_KEY: finrisk-ai/portfolio/terraform.tfstate" in reaper and "TF_STATE_KEY: finrisk-ai/portfolio/terraform.tfstate" in provision,
  "validation CI runs on reaper and policy changes": all(f'"{p}"' in validate_wf for p in
    [".github/workflows/reap-bounded-aws.yml","docs/aws-bootstrap-policy.json","docs/aws-eks-boundary-policy.json"]),
+ # The runner image's system Python only happens to have PyYAML; ci.yml failed without it.
+ "validation CI installs declared dependencies before any Python": "actions/setup-python@v5" in validate_wf
+   and "pip install -e '.[dev]'" in validate_wf and '"pyproject.toml"' in validate_wf
+   and validate_wf.index("pip install -e '.[dev]'") < min(validate_wf.index(s) for s in ("python - <<", "run: python")),
  "budget output not called a hard ceiling": 'output "budget_alert_limit_usd"' in outputs and "hard_ceiling" not in outputs,
  "Terraform no longer calls the budget a hard ceiling": not any(re.search(r"hard[ _-]ceiling",t,re.I) for t in tf_text.values()),
 }

@@ -1,0 +1,276 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ManageK8sCodeBuildProjects",
+      "Effect": "Allow",
+      "Action": [
+        "codebuild:BatchGetProjects",
+        "codebuild:CreateProject",
+        "codebuild:DeleteProject",
+        "codebuild:UpdateProject"
+      ],
+      "Resource": "arn:aws:codebuild:us-east-1:780976819607:project/finrisk-ai-portfolio-k8s-*"
+    },
+    {
+      "Sid": "K8sCodeBuildProjectsMustRunInVpc",
+      "Effect": "Deny",
+      "Action": "codebuild:CreateProject",
+      "Resource": "*",
+      "Condition": {
+        "Null": {
+          "codebuild:vpcConfig.vpcId": "true"
+        }
+      }
+    },
+    {
+      "Sid": "K8sCodeBuildUpdatesCannotDropVpc",
+      "Effect": "Deny",
+      "Action": "codebuild:UpdateProject",
+      "Resource": "*",
+      "Condition": {
+        "Null": {
+          "codebuild:vpcConfig": "false",
+          "codebuild:vpcConfig.vpcId": "true"
+        }
+      }
+    },
+    {
+      "Sid": "PassCodeBuildRunnerRoles",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::780976819607:role/finrisk-ai-codebuild-*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "codebuild.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "CreateBoundedCodeBuildRunnerRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::780976819607:role/finrisk-ai-codebuild-*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::780976819607:policy/finrisk-ai-eks-boundary"
+        }
+      }
+    },
+    {
+      "Sid": "ManageCodeBuildRunnerRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:DeleteRole",
+        "iam:TagRole",
+        "iam:UntagRole"
+      ],
+      "Resource": "arn:aws:iam::780976819607:role/finrisk-ai-codebuild-*"
+    },
+    {
+      "Sid": "CreateCodeBuildAccessEntries",
+      "Effect": "Allow",
+      "Action": "eks:CreateAccessEntry",
+      "Resource": "arn:aws:eks:us-east-1:780976819607:cluster/finrisk-ai-portfolio",
+      "Condition": {
+        "ArnLike": {
+          "eks:principalArn": "arn:aws:iam::780976819607:role/finrisk-ai-codebuild-*"
+        },
+        "StringEquals": {
+          "eks:accessEntryType": "STANDARD"
+        },
+        "Null": {
+          "eks:kubernetesGroups": "true",
+          "eks:username": "true"
+        }
+      }
+    },
+    {
+      "Sid": "NodeGroupAccessEntries",
+      "Effect": "Allow",
+      "Action": "eks:CreateAccessEntry",
+      "Resource": "arn:aws:eks:us-east-1:780976819607:cluster/finrisk-ai-portfolio",
+      "Condition": {
+        "ArnLike": {
+          "eks:principalArn": "arn:aws:iam::780976819607:role/finrisk-ai-eks-nodes-*"
+        },
+        "StringEquals": {
+          "eks:accessEntryType": "EC2_LINUX"
+        }
+      }
+    },
+    {
+      "Sid": "ManageCodeBuildAccessEntries",
+      "Effect": "Allow",
+      "Action": [
+        "eks:DeleteAccessEntry",
+        "eks:DescribeAccessEntry",
+        "eks:ListAssociatedAccessPolicies",
+        "eks:TagResource",
+        "eks:UntagResource"
+      ],
+      "Resource": [
+        "arn:aws:eks:us-east-1:780976819607:access-entry/finrisk-ai-portfolio/role/780976819607/finrisk-ai-codebuild-*",
+        "arn:aws:eks:us-east-1:780976819607:accessEntry/finrisk-ai-portfolio/role/780976819607/finrisk-ai-codebuild-*"
+      ]
+    },
+    {
+      "Sid": "AssociateNamespacedEditToDeployRunner",
+      "Effect": "Allow",
+      "Action": "eks:AssociateAccessPolicy",
+      "Resource": [
+        "arn:aws:eks:us-east-1:780976819607:access-entry/finrisk-ai-portfolio/role/780976819607/finrisk-ai-codebuild-deploy-*",
+        "arn:aws:eks:us-east-1:780976819607:accessEntry/finrisk-ai-portfolio/role/780976819607/finrisk-ai-codebuild-deploy-*"
+      ],
+      "Condition": {
+        "ArnEquals": {
+          "eks:policyArn": "arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy"
+        },
+        "StringEquals": {
+          "eks:accessScope": "namespace"
+        },
+        "ForAllValues:StringEquals": {
+          "eks:namespaces": "finrisk"
+        },
+        "Null": {
+          "eks:namespaces": "false"
+        }
+      }
+    },
+    {
+      "Sid": "AssociateClusterAdminToBootstrapRunner",
+      "Effect": "Allow",
+      "Action": "eks:AssociateAccessPolicy",
+      "Resource": [
+        "arn:aws:eks:us-east-1:780976819607:access-entry/finrisk-ai-portfolio/role/780976819607/finrisk-ai-codebuild-bootstrap-*",
+        "arn:aws:eks:us-east-1:780976819607:accessEntry/finrisk-ai-portfolio/role/780976819607/finrisk-ai-codebuild-bootstrap-*"
+      ],
+      "Condition": {
+        "ArnEquals": {
+          "eks:policyArn": "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+        },
+        "StringEquals": {
+          "eks:accessScope": "cluster"
+        }
+      }
+    },
+    {
+      "Sid": "DisassociateRunnerAccessPolicies",
+      "Effect": "Allow",
+      "Action": "eks:DisassociateAccessPolicy",
+      "Resource": [
+        "arn:aws:eks:us-east-1:780976819607:access-entry/finrisk-ai-portfolio/role/780976819607/finrisk-ai-codebuild-*",
+        "arn:aws:eks:us-east-1:780976819607:accessEntry/finrisk-ai-portfolio/role/780976819607/finrisk-ai-codebuild-*"
+      ],
+      "Condition": {
+        "ArnEquals": {
+          "eks:policyArn": [
+            "arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy",
+            "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DenyAnyOtherAccessPolicy",
+      "Effect": "Deny",
+      "Action": "eks:AssociateAccessPolicy",
+      "Resource": "*",
+      "Condition": {
+        "ArnNotEquals": {
+          "eks:policyArn": [
+            "arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy",
+            "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ManageMetricsServerAddon",
+      "Effect": "Allow",
+      "Action": [
+        "eks:CreateAddon",
+        "eks:ListAddons"
+      ],
+      "Resource": "arn:aws:eks:us-east-1:780976819607:cluster/finrisk-ai-portfolio"
+    },
+    {
+      "Sid": "ManageMetricsServerAddonLifecycle",
+      "Effect": "Allow",
+      "Action": [
+        "eks:DeleteAddon",
+        "eks:DescribeAddon",
+        "eks:DescribeUpdate",
+        "eks:TagResource",
+        "eks:UntagResource",
+        "eks:UpdateAddon"
+      ],
+      "Resource": "arn:aws:eks:us-east-1:780976819607:addon/finrisk-ai-portfolio/metrics-server/*"
+    },
+    {
+      "Sid": "ReadAddonCatalog",
+      "Effect": "Allow",
+      "Action": [
+        "eks:DescribeAddonConfiguration",
+        "eks:DescribeAddonVersions"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyBoundaryRemoval",
+      "Effect": "Deny",
+      "Action": [
+        "iam:DeleteRolePermissionsBoundary",
+        "iam:PutRolePermissionsBoundary"
+      ],
+      "Resource": "arn:aws:iam::780976819607:role/finrisk-ai-*"
+    },
+    {
+      "Sid": "DenyBoundaryPolicyEdits",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicy",
+        "iam:DeletePolicyVersion",
+        "iam:SetDefaultPolicyVersion"
+      ],
+      "Resource": "arn:aws:iam::780976819607:policy/finrisk-ai-eks-boundary"
+    },
+    {
+      "Sid": "DenyAssumingFinriskRoles",
+      "Effect": "Deny",
+      "Action": [
+        "sts:AssumeRole",
+        "sts:SetSourceIdentity",
+        "sts:TagSession"
+      ],
+      "Resource": "arn:aws:iam::780976819607:role/finrisk-ai-*"
+    },
+    {
+      "Sid": "DenyClusterCreatorAdmin",
+      "Effect": "Deny",
+      "Action": "eks:CreateCluster",
+      "Resource": "*",
+      "Condition": {
+        "BoolIfExists": {
+          "eks:bootstrapClusterCreatorAdminPermissions": "true"
+        }
+      }
+    },
+    {
+      "Sid": "DenyNonApiClusterAuth",
+      "Effect": "Deny",
+      "Action": "eks:CreateCluster",
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "eks:authenticationMode": "API"
+        }
+      }
+    }
+  ]
+}

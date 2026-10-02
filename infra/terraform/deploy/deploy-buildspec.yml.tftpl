@@ -1,0 +1,127 @@
+version: 0.2
+
+# Workload deploy. Runs as a role holding AmazonEKSEditPolicy scoped to the ${namespace}
+# namespace only. This file is fixed by Terraform and reviewed with the plan. The release
+# role can set exactly one StartBuild override, FINRISK_IMAGE_URI; IAM denies every other
+# override that has a condition key (timeout and debug-session overrides have none, and debug
+# sessions cannot connect without ssmmessages permissions). The value is validated again below.
+
+env:
+  shell: bash
+
+phases:
+  build:
+    commands:
+      - |
+        set -euo pipefail
+        NS="${namespace}"
+        APP="${app}"
+
+        # Defense in depth behind IAM: exact registry, repository and digest form; no tags,
+        # no other registry or repository, nothing after the digest.
+        if [[ ! "$FINRISK_IMAGE_URI" =~ ^${account_id}\.dkr\.ecr\.${region}\.amazonaws\.com/${repository}@sha256:[0-9a-f]{64}$ ]]; then
+          echo "FINRISK_IMAGE_URI rejected"
+          exit 1
+        fi
+
+        # Pinned kubectl (within one minor version of the cluster), verified against a
+        # checksum fixed in this file rather than one fetched from the same origin.
+        mkdir -p /opt/finrisk/bin
+        curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/${kubectl_version}/bin/linux/amd64/kubectl"
+        echo "${kubectl_sha256}  /tmp/kubectl" | sha256sum --check --strict
+        install -m 0755 /tmp/kubectl /opt/finrisk/bin/kubectl
+        K=/opt/finrisk/bin/kubectl
+        "$K" version --client
+
+        aws eks update-kubeconfig --name "${cluster_name}" --region "${region}"
+
+        # Access entries are eventually consistent, and the namespace must already exist
+        # (created by the bootstrap project); this role cannot create it.
+        for attempt in 1 2 3 4 5 6 7 8 9 10; do
+          if "$K" -n "$NS" get serviceaccount default >/dev/null 2>&1; then break; fi
+          if [ "$attempt" = 10 ]; then echo "namespace $NS is not reachable (run the bootstrap build first)"; exit 1; fi
+          sleep 6
+        done
+
+        echo "${manifest_b64}" | base64 -d > /tmp/manifest.yaml
+        test "$(grep -c FINRISK_IMAGE_PLACEHOLDER /tmp/manifest.yaml)" = 1
+        sed -i "s#FINRISK_IMAGE_PLACEHOLDER#$FINRISK_IMAGE_URI#" /tmp/manifest.yaml
+
+        # In-pod smoke test through the Service: ready, serving the pinned model, and returning
+        # a valid probability for a request built from the model's own feature list.
+        cat > /tmp/smoke.py <<'PY'
+        import json
+        import sys
+        import urllib.request
+
+        EXPECTED = "${model_sha256}"
+        BASE = "http://${app}.${namespace}.svc.cluster.local"
+
+        def fail(message):
+            print("smoke test failed: " + message)
+            sys.exit(1)
+
+        def get(path):
+            with urllib.request.urlopen(BASE + path, timeout=10) as response:
+                return json.load(response)
+
+        ready = get("/health/ready")
+        if ready.get("status") != "ready" or ready.get("model_sha256") != EXPECTED:
+            fail("readiness " + json.dumps(ready))
+        features = get("/v1/model")["features"]
+        body = json.dumps({"features": dict.fromkeys(features)}).encode()
+        request = urllib.request.Request(
+            BASE + "/v1/risk/predict", data=body, headers={"content-type": "application/json"}, method="POST"
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            prediction = json.load(response)
+        probability = prediction.get("distress_12m_probability")
+        if not isinstance(probability, float) or not 0.0 <= probability <= 1.0:
+            fail("prediction " + json.dumps(prediction))
+        if prediction.get("model_sha256") != EXPECTED:
+            fail("prediction model " + json.dumps(prediction))
+        print("FINRISK_EVIDENCE smoke=passed model_sha256=%s feature_count=%d probability=%.6f"
+              % (EXPECTED, len(features), probability))
+        PY
+
+        # Recorded before applying so a failure can return to exactly this revision. Only
+        # NotFound means a first deploy; any other error stops here, before anything changes.
+        PREV_REV="$("$K" -n "$NS" get deployment "$APP" --ignore-not-found -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')"
+
+        "$K" apply --server-side --field-manager=finrisk-codebuild --force-conflicts --dry-run=server -f /tmp/manifest.yaml
+
+        # Every step checks its own status: set -e does not apply inside a function used as a condition.
+        deploy_and_verify() {
+          "$K" apply --server-side --field-manager=finrisk-codebuild --force-conflicts -f /tmp/manifest.yaml || return 1
+          "$K" -n "$NS" rollout status deployment/"$APP" --timeout=300s || return 1
+          ready="$("$K" -n "$NS" get deployment "$APP" -o jsonpath='{.status.readyReplicas}')" || return 1
+          [ "$${ready:-0}" -ge 1 ] || return 1
+          "$K" -n "$NS" exec -i deploy/"$APP" -c inference -- python - < /tmp/smoke.py || return 1
+        }
+
+        rollback() {
+          if [ -n "$PREV_REV" ]; then
+            echo "Rolling back $APP to revision $PREV_REV"
+            "$K" -n "$NS" rollout undo deployment/"$APP" --to-revision="$PREV_REV" || return 1
+            "$K" -n "$NS" rollout status deployment/"$APP" --timeout=300s || return 1
+          else
+            # First deploy: there is no earlier revision to return to. Delete rather than scale
+            # to zero: the HPA never scales up from zero and the manifest sets no replicas, so a
+            # zero-replica Deployment would stay at zero through every later apply. NotFound means
+            # the apply failed before creating it, so there is nothing to remove.
+            echo "First deploy failed; deleting $APP"
+            "$K" -n "$NS" delete deployment "$APP" --ignore-not-found --wait=true || return 1
+          fi
+        }
+
+        if deploy_and_verify; then
+          revision="$("$K" -n "$NS" get deployment "$APP" -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')"
+          echo "FINRISK_EVIDENCE result=deployed image_uri=$FINRISK_IMAGE_URI revision=$revision"
+        else
+          if rollback; then
+            echo "FINRISK_EVIDENCE result=rolled_back previous_revision=$${PREV_REV:-none}"
+          else
+            echo "FINRISK_EVIDENCE result=rollback_failed previous_revision=$${PREV_REV:-none}"
+          fi
+          exit 1
+        fi

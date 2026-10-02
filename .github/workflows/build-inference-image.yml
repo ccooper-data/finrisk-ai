@@ -1,0 +1,187 @@
+name: Build Inference Image
+
+# The served model is pinned in model/served-model.json; changing it takes a reviewed commit.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  actions: read
+
+concurrency:
+  group: finrisk-inference-image
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: finrisk-ai-inference
+
+jobs:
+  build:
+    # Release environment and role: ECR push only, no infrastructure permissions.
+    environment: portfolio-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate pinned model source run
+        id: pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pin=model/served-model.json
+          run_id="$(jq -r '.model_run_id' "$pin")"
+          case "$run_id" in (*[!0-9]*|"") echo "model_run_id in $pin must be numeric"; exit 1;; esac
+          run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}")"
+          test "$(jq -r '.path' <<<"$run_json")" = "$(jq -r '.source_workflow' "$pin")"
+          test "$(jq -r '.head_branch' <<<"$run_json")" = "main"
+          test "$(jq -r '.conclusion' <<<"$run_json")" = "success"
+          test "$(jq -r '.event' <<<"$run_json")" = "workflow_dispatch"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "artifact=$(jq -r '.artifact_name' "$pin")" >> "$GITHUB_OUTPUT"
+          echo "file=$(jq -r '.file' "$pin")" >> "$GITHUB_OUTPUT"
+          echo "size=$(jq -r '.size_bytes' "$pin")" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(jq -r '.sha256' "$pin")" >> "$GITHUB_OUTPUT"
+          # Actions artifacts expire (train-boosted-tree.yml keeps them 30 days). An expired pin
+          # is fixed by retraining, showing equivalence and re-pinning, never by skipping checks.
+          artifact="$(jq -r '.artifact_name' "$pin")"
+          expired="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts" --jq ".artifacts[] | select(.name == \"$artifact\") | .expired")"
+          if [ "$expired" != "false" ]; then
+            echo "::error::Pinned artifact $artifact is expired or missing. Retrain, show prediction equivalence, and update model/served-model.json in a reviewed commit."
+            exit 1
+          fi
+
+      - name: Download pinned model artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.pin.outputs.artifact }}
+          path: model-artifact
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.pin.outputs.run_id }}
+
+      # Provenance alone isn't enough: the file must also be byte-identical to the pin.
+      - name: Stage model into build context
+        id: model
+        env:
+          MODEL_FILE: ${{ steps.pin.outputs.file }}
+          PINNED_SHA256: ${{ steps.pin.outputs.sha256 }}
+          PINNED_SIZE: ${{ steps.pin.outputs.size }}
+        run: |
+          test -f "model-artifact/$MODEL_FILE"
+          size="$(stat -c %s "model-artifact/$MODEL_FILE")"
+          if [ "$size" != "$PINNED_SIZE" ]; then
+            echo "::error::Model size $size bytes does not match pinned $PINNED_SIZE"
+            exit 1
+          fi
+          actual="$(sha256sum "model-artifact/$MODEL_FILE" | cut -d' ' -f1)"
+          if [ "$actual" != "$PINNED_SHA256" ]; then
+            echo "::error::Model SHA-256 $actual does not match pinned $PINNED_SHA256"
+            exit 1
+          fi
+          cp "model-artifact/$MODEL_FILE" model/boosted_tree_model.joblib
+          echo "sha256=$actual" >> "$GITHUB_OUTPUT"
+
+      # scikit-learn pickles load reliably only with the versions that wrote them. The training
+      # run records its environment next to the model; the serving pins must match it exactly.
+      - name: Check serving pins against the training environment
+        run: |
+          env_json="$(jq -c '.environment' model-artifact/boosted_tree_metrics.json)"
+          for pair in scikit-learn:scikit_learn numpy:numpy pandas:pandas; do
+            package="${pair%%:*}"; field="${pair#*:}"
+            trained="$(jq -r --arg f "$field" '.[$f]' <<<"$env_json")"
+            pinned="$(sed -n "s/^${package}==//p" constraints/serving.txt)"
+            if [ "$trained" != "$pinned" ]; then
+              echo "::error::$package: training used $trained, constraints/serving.txt pins $pinned"
+              exit 1
+            fi
+          done
+          trained_python="$(jq -r '.python' <<<"$env_json" | cut -d. -f1,2)"
+          image_python="$(sed -n 's/^FROM python:\([0-9]*\.[0-9]*\)-slim$/\1/p' Dockerfile)"
+          if [ "$trained_python" != "$image_python" ]; then
+            echo "::error::Python: training used $trained_python, the image uses $image_python"
+            exit 1
+          fi
+
+      - name: Build candidate image
+        run: |
+          docker build --pull \
+            --build-arg GIT_SHA="${GITHUB_SHA}" \
+            --build-arg MODEL_SHA256="${{ steps.model.outputs.sha256 }}" \
+            --build-arg MODEL_RUN_ID="${{ steps.pin.outputs.run_id }}" \
+            --tag "finrisk-inference:candidate" .
+
+      - name: Check library versions inside the image
+        run: |
+          docker run --rm --entrypoint python finrisk-inference:candidate -c \
+            'import json, sklearn, numpy, pandas; print(json.dumps({"scikit-learn": sklearn.__version__, "numpy": numpy.__version__, "pandas": pandas.__version__}))' > image-versions.json
+          for package in scikit-learn numpy pandas; do
+            test "$(jq -r --arg p "$package" '.[$p]' image-versions.json)" = "$(sed -n "s/^${package}==//p" constraints/serving.txt)"
+          done
+
+      # The image must load the real model and serve a prediction before it is pushed.
+      - name: Verify candidate serves the model
+        env:
+          EXPECTED_MODEL_SHA256: ${{ steps.model.outputs.sha256 }}
+        run: |
+          docker run -d --name candidate -p 127.0.0.1:8000:8000 --read-only --tmpfs /tmp finrisk-inference:candidate
+          trap 'docker logs candidate | tail -n 50; docker rm -f candidate >/dev/null' EXIT
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8000/health/ready -o ready.json && break
+            sleep 2
+          done
+          test "$(jq -r '.model_sha256' ready.json)" = "$EXPECTED_MODEL_SHA256"
+          curl -fsS http://127.0.0.1:8000/v1/model -o model.json
+          jq '{features: (.features | map({key: ., value: null}) | from_entries)}' model.json > request.json
+          curl -fsS -X POST -H 'content-type: application/json' --data @request.json \
+            http://127.0.0.1:8000/v1/risk/predict -o prediction.json
+          jq -e '.distress_12m_probability >= 0 and .distress_12m_probability <= 1' prediction.json
+          test "$(jq -r '.model_sha256' prediction.json)" = "$EXPECTED_MODEL_SHA256"
+
+      - name: Configure short-lived AWS credentials (release role)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_RELEASE_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Tags are immutable in ECR; one image per commit.
+      - name: Push image and resolve digest
+        id: push
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          tag="sha-${GITHUB_SHA}"
+          if aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$tag" >/dev/null 2>&1; then
+            echo "::error::Image tag $tag already exists in $ECR_REPOSITORY"
+            exit 1
+          fi
+          docker tag finrisk-inference:candidate "$REGISTRY/$ECR_REPOSITORY:$tag"
+          docker push "$REGISTRY/$ECR_REPOSITORY:$tag"
+          digest="$(aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$tag" --query 'imageDetails[0].imageDigest' --output text)"
+          case "$digest" in (sha256:*) ;; (*) echo "could not resolve image digest"; exit 1;; esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "uri=$REGISTRY/$ECR_REPOSITORY@$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Record image evidence
+        run: |
+          mkdir -p evidence
+          {
+            echo "git_sha=${GITHUB_SHA}"
+            echo "image_tag=${{ steps.push.outputs.tag }}"
+            echo "image_uri=${{ steps.push.outputs.uri }}"
+            echo "model_run_id=${{ steps.pin.outputs.run_id }}"
+            echo "model_sha256=${{ steps.model.outputs.sha256 }}"
+          } > evidence/image.txt
+          cat evidence/image.txt
+
+      - name: Upload image evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: finrisk-inference-image-evidence
+          path: evidence/
+          retention-days: 7

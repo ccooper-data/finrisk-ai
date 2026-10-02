@@ -1,0 +1,8 @@
+{
+  "source_workflow": ".github/workflows/train-boosted-tree.yml",
+  "model_run_id": "37055204267",
+  "artifact_name": "finrisk-boosted-tree-37055204267",
+  "file": "boosted_tree_model.joblib",
+  "size_bytes": 606684,
+  "sha256": "ede499723ff72920048ceae5ddbc878ef90e6a8122b206bb5986efcc78e5b72b"
+}
