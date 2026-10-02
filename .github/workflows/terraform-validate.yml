@@ -63,6 +63,8 @@ jobs:
         run: python infra/tests/test_plan_review_hardening.py
       - name: Second review hardening acceptance
         run: python infra/tests/test_second_review_hardening.py
+      - name: Post-validation hardening acceptance
+        run: python infra/tests/test_post_validation_hardening.py
       - name: Cloud security acceptance
         run: python infra/tests/test_security_foundation.py
       - name: Observability and SLO acceptance

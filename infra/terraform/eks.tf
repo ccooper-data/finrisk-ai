@@ -22,6 +22,23 @@ resource "aws_iam_role_policy_attachment" "eks_cluster" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
 }
 
+# AZ names map to different AZ IDs in each account, and EKS rejects control-plane
+# subnets in some AZ IDs. Resolve the IDs at plan time so a bad zone fails PLAN instead
+# of failing APPLY after the VPC and NAT already exist.
+# https://docs.aws.amazon.com/eks/latest/userguide/network-reqs.html
+locals {
+  eks_unsupported_az_ids = ["use1-az3"]
+}
+
+data "aws_availability_zones" "eks" {
+  count = var.enable_eks ? 1 : 0
+
+  filter {
+    name   = "zone-name"
+    values = var.availability_zones
+  }
+}
+
 resource "aws_eks_cluster" "platform" {
   count    = var.enable_eks ? 1 : 0
   name     = "${var.project_name}-${var.environment}"
@@ -37,6 +54,13 @@ resource "aws_eks_cluster" "platform" {
     endpoint_private_access = true
     endpoint_public_access  = length(var.eks_public_access_cidrs) > 0
     public_access_cidrs     = var.eks_public_access_cidrs
+  }
+
+  lifecycle {
+    precondition {
+      condition     = length(setintersection(data.aws_availability_zones.eks[0].zone_ids, local.eks_unsupported_az_ids)) == 0
+      error_message = "An availability zone in var.availability_zones maps to an AZ ID that EKS does not support for control-plane subnets (${join(", ", local.eks_unsupported_az_ids)}). Choose different zones."
+    }
   }
 
   depends_on = [aws_iam_role_policy_attachment.eks_cluster]
@@ -97,7 +121,13 @@ resource "aws_eks_node_group" "platform" {
     max_unavailable = 1
   }
 
-  depends_on = [aws_iam_role_policy_attachment.eks_nodes]
+  # Nodes reach EC2/ECR only through the NAT route, so launch them after it exists
+  # (and destroy them before it is removed).
+  depends_on = [
+    aws_iam_role_policy_attachment.eks_nodes,
+    aws_nat_gateway.platform,
+    aws_route_table_association.private,
+  ]
 
   tags = {
     Name = "${var.project_name}-${var.environment}-workers"

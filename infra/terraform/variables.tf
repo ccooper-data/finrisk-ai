@@ -17,13 +17,13 @@ variable "environment" {
 }
 
 variable "monthly_budget_limit_usd" {
-  description = "Hard AWS budget ceiling for this portfolio environment."
+  description = "Monthly AWS Budget alert limit for this portfolio environment (capped at $100). Alerts only; teardown is what stops spend."
   type        = number
   default     = 100
 
   validation {
     condition     = var.monthly_budget_limit_usd > 0 && var.monthly_budget_limit_usd <= 100
-    error_message = "FinRisk-AI portfolio budget must be greater than $0 and cannot exceed the $100 hard ceiling."
+    error_message = "FinRisk-AI portfolio budget must be greater than $0 and cannot exceed the $100 cap."
   }
 }
 

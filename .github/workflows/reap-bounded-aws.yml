@@ -35,6 +35,8 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+          # Long enough for an EKS destroy; requires the role's MaxSessionDuration >= 7200.
+          role-duration-seconds: 7200
 
       - name: Initialize persistent Terraform state
         run: |
@@ -45,10 +47,20 @@ jobs:
             -backend-config="dynamodb_table=${{ vars.TF_LOCK_TABLE }}" \
             -backend-config="encrypt=true"
 
+      # Before the first APPLY there is no state object, which `state list` reports as an
+      # error. That means nothing is deployed; any other state error still fails the job.
       - name: Inspect state
         id: state
         run: |
-          terraform -chdir="$TF_DIR" state list > state.txt
+          if ! terraform -chdir="$TF_DIR" state list > state.txt 2> state.err; then
+            if grep -q 'No state file was found' state.err; then
+              : > state.txt
+              echo "No Terraform state exists yet; nothing is deployed"
+            else
+              cat state.err >&2
+              exit 1
+            fi
+          fi
           if test -s state.txt; then echo "nonempty=true" >> "$GITHUB_OUTPUT"; else echo "nonempty=false" >> "$GITHUB_OUTPUT"; fi
 
       # A missing lease is a normal idle condition (404), not a failure. Any other
@@ -58,15 +70,16 @@ jobs:
         env:
           TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
         run: |
-          if ! err="$(aws s3api head-object --bucket "$TF_STATE_BUCKET" --key "$LEASE_KEY" 2>&1 >/dev/null)"; then
-            if grep -q '(404)' <<<"$err"; then
+          if ! etag="$(aws s3api head-object --bucket "$TF_STATE_BUCKET" --key "$LEASE_KEY" --query ETag --output text 2> head.err)"; then
+            if grep -q '(404)' head.err; then
               echo "present=false" >> "$GITHUB_OUTPUT"
               echo "No teardown lease present"
               exit 0
             fi
-            printf '%s\n' "$err" >&2
+            cat head.err >&2
             exit 1
           fi
+          echo "etag=$etag" >> "$GITHUB_OUTPUT"
           aws s3 cp "s3://$TF_STATE_BUCKET/$LEASE_KEY" deadline.txt
           deadline="$(tr -d '\r\n' < deadline.txt)"
           test -n "$deadline"
@@ -101,7 +114,17 @@ jobs:
           test -z "$remaining"
 
       # Only an expired lease is cleared. An active lease with empty state means an
-      # APPLY may be starting, so it is left in place.
+      # APPLY may be starting, so it is left in place. The ETag re-check avoids deleting
+      # a fresh lease that an APPLY wrote after this run read the old one.
       - name: Clear expired lease
         if: steps.lease.outputs.present == 'true' && steps.lease.outputs.expired == 'true'
-        run: aws s3 rm "s3://${{ vars.TF_STATE_BUCKET }}/$LEASE_KEY"
+        env:
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          LEASE_ETAG: ${{ steps.lease.outputs.etag }}
+        run: |
+          current="$(aws s3api head-object --bucket "$TF_STATE_BUCKET" --key "$LEASE_KEY" --query ETag --output text 2>/dev/null || true)"
+          if [ "$current" != "$LEASE_ETAG" ]; then
+            echo "Lease changed or was removed since it was read; leaving it in place"
+            exit 0
+          fi
+          aws s3 rm "s3://$TF_STATE_BUCKET/$LEASE_KEY"

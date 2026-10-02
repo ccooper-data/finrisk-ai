@@ -31,7 +31,7 @@ checks = {
         == "arn:aws:budgets::780976819607:budget/finrisk-ai-*"
         and "var.project_name}-${var.environment}-validation-alerts" in main,
     "EKS standard support": 'support_type = "STANDARD"' in eks and 'default     = "1.35"' in variables,
-    "teardown deadline recorded": 'VALIDATION_MAX_HOURS: "6"' in workflow and "teardown-deadline.txt" in workflow,
+    "teardown deadline recorded": 'VALIDATION_MAX_HOURS: "4"' in workflow and "teardown-deadline.txt" in workflow,
 }
 failed = [k for k,v in checks.items() if not v]
 for k,v in checks.items():
