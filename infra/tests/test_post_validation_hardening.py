@@ -9,7 +9,9 @@ provision=(ROOT/".github/workflows/provision-bounded-aws.yml").read_text()
 reaper=(ROOT/".github/workflows/reap-bounded-aws.yml").read_text()
 eks=(ROOT/"infra/terraform/eks.tf").read_text()
 outputs=(ROOT/"infra/terraform/outputs.tf").read_text()
-tf_text={p.name:p.read_text() for p in (ROOT/"infra/terraform").glob("*")}
+# Only source files: CI runs `terraform init` first, which adds a .terraform directory here.
+TF_DIR=ROOT/"infra/terraform"
+tf_text={p.name:p.read_text() for p in [*TF_DIR.glob("*.tf"),TF_DIR/"README.md"]}
 policy=json.loads((ROOT/"docs/aws-bootstrap-policy.json").read_text())
 stmts={s["Sid"]:s for s in policy["Statement"]}
 
