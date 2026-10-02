@@ -41,8 +41,17 @@ checks = {
         == "arn:aws:kms:us-east-1:780976819607:alias/finrisk-ai-*",
     "budget scoped": statements["ManageFinRiskBudget"]["Resource"]
         == "arn:aws:budgets::780976819607:budget/finrisk-ai-*",
-    "managed attachments constrained": "iam:PolicyARN"
-        in statements["AttachOnlyApprovedManagedPolicies"]["Condition"]["ArnEquals"],
+    "cluster attachment constrained": statements["AttachApprovedClusterPolicy"]["Resource"]
+        == "arn:aws:iam::*:role/finrisk-ai-eks-cluster-*"
+        and statements["AttachApprovedClusterPolicy"]["Condition"]["ArnEquals"]["iam:PolicyARN"]
+        == ["arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"],
+    "node attachments constrained": statements["AttachApprovedNodePolicies"]["Resource"]
+        == "arn:aws:iam::*:role/finrisk-ai-eks-nodes-*"
+        and set(statements["AttachApprovedNodePolicies"]["Condition"]["ArnEquals"]["iam:PolicyARN"]) == {
+            "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy",
+            "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy",
+            "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPullOnly",
+        },
     "pass role service constrained": "iam:PassedToService"
         in statements["PassOnlyFinRiskRolesToCompute"]["Condition"]["StringEquals"],
     "S3 bucket scope covers Terraform prefixes": set(statements["ManageFinRiskBuckets"]["Resource"]) == {
