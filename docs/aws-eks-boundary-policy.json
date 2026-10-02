@@ -1,0 +1,41 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EKSClusterControlPlane",
+      "Effect": "Allow",
+      "Action": ["eks:*"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "EC2WorkerRuntime",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeInstances","ec2:DescribeInstanceTypes","ec2:DescribeRegions",
+        "ec2:DescribeAvailabilityZones","ec2:DescribeRouteTables","ec2:DescribeSecurityGroups",
+        "ec2:DescribeSubnets","ec2:DescribeVpcs","ec2:DescribeVolumes",
+        "ec2:DescribeVolumesModifications","ec2:DescribeNetworkInterfaces","ec2:DescribeTags"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ECRPull",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetAuthorizationToken","ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer","ecr:BatchGetImage"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "EKSCNINetworking",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:AssignPrivateIpAddresses","ec2:AttachNetworkInterface","ec2:CreateNetworkInterface",
+        "ec2:DeleteNetworkInterface","ec2:DescribeNetworkInterfaces","ec2:DetachNetworkInterface",
+        "ec2:ModifyNetworkInterfaceAttribute","ec2:UnassignPrivateIpAddresses"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
