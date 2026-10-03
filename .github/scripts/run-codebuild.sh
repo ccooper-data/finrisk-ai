@@ -42,13 +42,18 @@ trap 'exit 130' INT TERM
 nap() { sleep "$1" >/dev/null 2>&1 & wait $!; }
 
 # A failed status read is retried until the deadline rather than stopping the build: a stop
-# mid-rollout would also stop the buildspec's own rollback.
+# mid-rollout would also stop the buildspec's own rollback. Only CodeBuild's terminal statuses end
+# the wait; anything else, such as the CLI's "None" for a build it cannot find, is retried too.
 deadline=$((SECONDS + wait_minutes * 60))
 while :; do
   if build="$(aws codebuild batch-get-builds --ids "$build_id" --output text \
       --query 'builds[0].[buildStatus,logs.groupName,logs.streamName]')"; then
     IFS=$'\t' read -r status group stream <<<"$build"
-    [ "$status" != "IN_PROGRESS" ] && break
+    case "$status" in
+      SUCCEEDED|FAILED|FAULT|TIMED_OUT|STOPPED) break ;;
+      IN_PROGRESS) ;;
+      *) echo "::warning::Unexpected status '$status' for $build_id; retrying" ;;
+    esac
   else
     echo "::warning::Could not read the status of $build_id; retrying"
   fi

@@ -3,12 +3,15 @@
 cleanup step in tests.
 
 FAKE_AWS_STATE is a JSON file with:
-  polls   build statuses for successive status reads; FAIL fails the read the way the CLI does
-          once its own retries are used up. The last entry repeats.
-  logs    outcomes (OK or FAIL) of successive get-log-events calls; the last entry repeats.
-  events  log messages an OK read returns.
-stop-build makes later status reads return IN_PROGRESS once more, then STOPPED. Every call is
-appended to "calls"; the file is replaced atomically so a test can read it mid-run.
+  polls       build statuses for successive status reads; FAIL fails the read the way the CLI
+              does once its own retries are used up, and NOT_FOUND returns no build (the id is in
+              buildsNotFound), which --output text prints as a bare None. The last entry repeats.
+  after_stop  what polls becomes once stop-build is called; IN_PROGRESS once more, then STOPPED,
+              if absent.
+  no_logs     true when the build has no logs location, so its group and stream print as None.
+  logs        outcomes (OK or FAIL) of successive get-log-events calls; the last entry repeats.
+  events      log messages an OK read returns.
+Every call is appended to "calls"; the file is replaced atomically so a test can read it mid-run.
 """
 import json
 import os
@@ -41,23 +44,24 @@ def take(key):
 if args[:2] == ["codebuild", "start-build"]:
     done(0, option("--project-name") + ":build-1")
 if args[:2] == ["codebuild", "stop-build"]:
-    state["stopping"] = 1
+    state["polls"] = state.get("after_stop", ["IN_PROGRESS", "STOPPED"])
     done(0)
 if args[:2] == ["codebuild", "batch-get-builds"]:
     query = option("--query")
     fields = {"groupName": "/finrisk/codebuild/test", "streamName": "k8s/build-1"}
+    if state.get("no_logs"):
+        fields = {"groupName": None, "streamName": None}
     if "buildStatus" in query:
-        if "stopping" in state:
-            fields["buildStatus"] = "IN_PROGRESS" if state["stopping"] else "STOPPED"
-            state["stopping"] = 0
-        else:
-            fields["buildStatus"] = take("polls")
+        fields["buildStatus"] = take("polls")
         if fields["buildStatus"] == "FAIL":
             print("Could not connect to the endpoint URL: \"https://codebuild.us-east-1.amazonaws.com/\"",
                   file=sys.stderr)
             done(255)
-    # --output text prints a multiselect list tab-separated, in query order.
-    done(0, "\t".join(fields[k] for k in sorted((k for k in fields if k in query), key=query.index)))
+        if fields["buildStatus"] == "NOT_FOUND":
+            # builds[0] is null, so the whole query is null.
+            done(0, "None")
+    # --output text prints a multiselect list tab-separated, in query order, and a null as None.
+    done(0, "\t".join(str(fields[k]) for k in sorted((k for k in fields if k in query), key=query.index)))
 if args[:2] == ["logs", "get-log-events"]:
     if take("logs") == "FAIL":
         print("An error occurred (ResourceNotFoundException) when calling the GetLogEvents operation: "

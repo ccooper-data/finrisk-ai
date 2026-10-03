@@ -17,6 +17,8 @@ on:
       - "docs/aws-release-trust-policy.json"
       - "docs/aws-deployer-deploy-path-policy.json"
       - ".github/workflows/build-inference-image.yml"
+      - ".github/workflows/container-validate.yml"
+      - "src/finrisk/modeling/boosted_tree.py"
       - ".github/scripts/**"
       - "Dockerfile"
       - ".dockerignore"

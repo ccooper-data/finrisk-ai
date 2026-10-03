@@ -5,6 +5,8 @@ on:
     paths:
       - "Dockerfile"
       - ".dockerignore"
+      # Copied into the image by the Dockerfile; the build fails without it.
+      - "README.md"
       - "constraints/**"
       - "model/**"
       - "pyproject.toml"
@@ -34,6 +36,83 @@ jobs:
         run: |
           test "$(docker inspect --format='{{json .Config.Healthcheck.Test}}' "finrisk-ai:sha-${GITHUB_SHA}")" != "null"
 
+      # ci.yml runs on Python 3.11 with unpinned libraries. These steps run the image that ships:
+      # Python 3.12 with the constraints/serving.txt pins the model pickle was written with.
+      # The imports cover every module the boosted-tree bundle's pickle references.
+      - name: Check the serving stack inside the image
+        timeout-minutes: 5
+        run: |
+          docker run --rm --entrypoint python "finrisk-ai:sha-${GITHUB_SHA}" -m pip check
+          docker run --rm --read-only --tmpfs /tmp --entrypoint python "finrisk-ai:sha-${GITHUB_SHA}" \
+            -c 'import finrisk.serving, sklearn.ensemble, sklearn.impute, scipy, numpy, pandas, joblib'
+
+      # Runs the image as infra/k8s/inference.yaml does: read-only root, writable /tmp, no
+      # capabilities, no privilege escalation, the same memory limit. A PR checkout has no model
+      # file (model/.gitignore), so the service must be live and report not ready. The probe
+      # deadline ends the step; timeout-minutes is the backstop if a command itself hangs.
+      - name: Boot the image read-only and probe health
+        timeout-minutes: 5
+        run: |
+          trap 'status=$?; if [ "$status" -ne 0 ]; then docker logs candidate 2>&1 | tail -n 100; fi; docker rm -f candidate >/dev/null 2>&1 || true' EXIT
+          docker run -d --name candidate -p 127.0.0.1:8000:8000 --read-only --tmpfs /tmp \
+            --cap-drop ALL --security-opt no-new-privileges --memory 512m "finrisk-ai:sha-${GITHUB_SHA}"
+          deadline=$((SECONDS + 60))
+          until [ "$(curl -s -o live.json -w '%{http_code}' --max-time 2 http://127.0.0.1:8000/health/live)" = "200" ]; do
+            running="$(docker inspect --format '{{.State.Running}}' candidate)"
+            if [ "$running" != "true" ] || [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::/health/live never returned 200 (container running: $running)"
+              exit 1
+            fi
+            sleep 2
+          done
+          jq -e '. == {"status": "ok"}' live.json
+          code="$(curl -s -o ready.json -w '%{http_code}' --max-time 5 http://127.0.0.1:8000/health/ready)"
+          if [ "$code" != "503" ] || ! jq -e '.detail == "Model artifact not found: /app/model/boosted_tree_model.joblib"' ready.json >/dev/null; then
+            echo "::error::/health/ready returned $code $(cat ready.json); with no model file it must be 503, model not found"
+            exit 1
+          fi
+
+      # The pinned model never enters a PR checkout. A stand-in with the same estimator types and
+      # bundle contract (finrisk.modeling.boosted_tree) goes through the serving code's load and
+      # predict path on the pinned libraries; build-inference-image.yml repeats this with the real
+      # model before pushing.
+      - name: Serve a stand-in model on the shipped stack
+        timeout-minutes: 5
+        run: |
+          docker run --rm -i --read-only --tmpfs /tmp -e FINRISK_MODEL_PATH=/tmp/model.joblib \
+            --entrypoint python "finrisk-ai:sha-${GITHUB_SHA}" - <<'PY'
+          import hashlib, os
+          import joblib, numpy as np, pandas as pd
+          from fastapi import HTTPException
+          from sklearn.ensemble import HistGradientBoostingClassifier
+          from sklearn.impute import SimpleImputer
+
+          features = ["f0", "f1", "f2"]
+          rng = np.random.default_rng(0)
+          frame = pd.DataFrame(rng.normal(size=(300, 3)), columns=features)
+          frame.loc[::5, "f1"] = np.nan
+          target = (frame["f0"] > 0).astype(int).to_numpy()
+          imputer = SimpleImputer(strategy="median", add_indicator=True)
+          x = imputer.fit_transform(frame)
+          model = HistGradientBoostingClassifier(max_iter=20, random_state=42).fit(x, target)
+          path = os.environ["FINRISK_MODEL_PATH"]
+          joblib.dump({"model": model, "imputer": imputer, "features": features}, path)
+
+          import finrisk.serving as serving
+          ready = serving.readiness()
+          assert ready["model_sha256"] == hashlib.sha256(open(path, "rb").read()).hexdigest(), ready
+          for values in ({"f0": 1.5, "f1": None, "f2": -0.3}, dict.fromkeys(features)):
+              result = serving.predict(serving.PredictionRequest(features=values))
+              assert 0.0 <= result["distress_12m_probability"] <= 1.0, result
+          try:
+              serving.predict(serving.PredictionRequest(features={"f0": 1.0}))
+              raise AssertionError("a request missing features was accepted")
+          except HTTPException as exc:
+              assert exc.status_code == 422, exc.detail
+          print("stand-in model served:", ready)
+          PY
+
       - name: Record image identity
         run: |
-          docker image inspect "finrisk-ai:sha-${GITHUB_SHA}"             --format='candidate_tag=sha-${{ github.sha }} image_id={{.Id}}'
+          docker image inspect "finrisk-ai:sha-${GITHUB_SHA}" \
+            --format='candidate_tag=sha-${{ github.sha }} image_id={{.Id}}'

@@ -84,26 +84,28 @@ jobs:
       # runner kills a cancelled step 10 seconds after signalling it. This step stops any build
       # still without a final status and waits for the stop while the job holds the concurrency
       # group, so a queued DESTROY cannot start under it. Bounded to end inside GitHub's 5-minute
-      # cancellation timeout.
+      # cancellation timeout. Only CodeBuild's terminal statuses count as finished, so a read
+      # error or the CLI's "None" for a build it cannot find never releases the group early.
       - name: Stop unfinished builds
         if: failure() || cancelled()
         timeout-minutes: 4
         run: |
+          terminal() { case "$1" in SUCCEEDED|FAILED|FAULT|TIMED_OUT|STOPPED) return 0 ;; esac; return 1; }
           [ -f "$EVIDENCE_FILE" ] || exit 0
           for id in $(sed -n 's/^[a-z0-9-]*_build_id=//p' "$EVIDENCE_FILE"); do
             project="${id%%:*}"
-            grep -q "^${project}_status=" "$EVIDENCE_FILE" && continue
+            terminal "$(sed -n "s/^${project}_status=//p" "$EVIDENCE_FILE")" && continue
             echo "::warning::Stopping $id"
             aws codebuild stop-build --id "$id" >/dev/null || true
             deadline=$((SECONDS + 180))
             while :; do
               status="$(aws codebuild batch-get-builds --ids "$id" --query 'builds[0].buildStatus' --output text)" || status=UNKNOWN
-              [ "$status" != IN_PROGRESS ] && [ "$status" != UNKNOWN ] && break
+              terminal "$status" && break
               [ "$SECONDS" -lt "$deadline" ] || break
               sleep 5
             done
             echo "${project}_status_after_stop=$status" >> "$EVIDENCE_FILE"
-            if [ "$status" = IN_PROGRESS ] || [ "$status" = UNKNOWN ]; then
+            if ! terminal "$status"; then
               echo "::error::$id may still be running; do not DESTROY until it has stopped"
               exit 1
             fi

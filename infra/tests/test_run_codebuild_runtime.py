@@ -40,10 +40,11 @@ stub(fake_bin / "aws", f'exec "{sys.executable}" "{FAKE_AWS}" "$@"')
 stub(no_sleep / "sleep", "exit 0")
 
 
-def start(name, command, polls=("SUCCEEDED",), logs=("OK",), evidence="", real_sleep=False, env=None):
+def start(name, command, polls=("SUCCEEDED",), logs=("OK",), evidence="", real_sleep=False, env=None,
+          **fake):
     state, evidence_file = work / f"{name}.json", work / f"{name}.txt"
     state.write_text(json.dumps({"polls": list(polls), "logs": list(logs), "calls": [],
-                                 "events": ["FINRISK_EVIDENCE result=deployed revision=2"]}))
+                                 "events": ["FINRISK_EVIDENCE result=deployed revision=2"], **fake}))
     evidence_file.write_text(evidence)
     path = [str(fake_bin)] + ([] if real_sleep else [str(no_sleep)]) + [os.environ["PATH"]]
     run_env = dict(os.environ, **(env or {}))
@@ -73,6 +74,10 @@ def finish(run, timeout):
 
 def stops(calls):
     return [c for c in calls if c.startswith("codebuild stop-build")]
+
+
+def log_reads(calls):
+    return [c for c in calls if c.startswith("logs get-log-events")]
 
 
 def cancel(name, command, env=None):
@@ -111,6 +116,18 @@ code, out, calls, evidence = finish(start("unreadable-logs", DEPLOY_ARGS, polls=
 checks["unreadable logs still reach the status check"] = code == 1 and not stops(calls) \
     and f"build {DEPLOY}:build-1 finished with status FAILED" in out
 
+code, out, calls, evidence = finish(start("null-logs", DEPLOY_ARGS, polls=["FAILED"], no_logs=True), 30)
+checks["a build with no logs location reaches the status check without reading logs"] = code == 1 \
+    and not stops(calls) and not log_reads(calls) \
+    and f"build {DEPLOY}:build-1 finished with status FAILED" in out
+
+# A build missing from batch-get-builds makes the CLI print a bare None, which is not a result.
+code, out, calls, evidence = finish(start("unexpected-status", DEPLOY_ARGS,
+                                          polls=["IN_PROGRESS", "NOT_FOUND", "SUCCEEDED"]), 30)
+checks["only a terminal status ends the wait"] = code == 0 and not stops(calls) \
+    and "Unexpected status 'None'" in out and f"{DEPLOY}_status=None" not in evidence \
+    and f"{DEPLOY}_status=SUCCEEDED" in evidence and f"{DEPLOY}: result=deployed revision=2" in evidence
+
 code, out, calls, evidence = finish(start("deadline", DEPLOY_ARGS, polls=["IN_PROGRESS"],
                                           env={"CODEBUILD_WAIT_MINUTES": "0"}), 30)
 checks["the deadline stops the build"] = code == 1 and "Timed out" in out and len(stops(calls)) == 1
@@ -119,6 +136,11 @@ code, out, calls, evidence = finish(start("status-unreadable", DEPLOY_ARGS, poll
                                           env={"CODEBUILD_WAIT_MINUTES": "0"}), 30)
 checks["status read errors stop the build only at the deadline"] = code == 1 and "Timed out" in out \
     and "Could not read the status" in out and len(stops(calls)) == 1
+
+code, out, calls, evidence = finish(start("status-unexpected", DEPLOY_ARGS, polls=["NOT_FOUND"],
+                                          env={"CODEBUILD_WAIT_MINUTES": "0"}), 30)
+checks["an unexpected status is never recorded and stops the build at the deadline"] = code == 1 \
+    and "Timed out" in out and len(stops(calls)) == 1 and f"{DEPLOY}_status=" not in evidence
 
 code, out, calls, evidence = cancel("cancel-runner", DEPLOY_ARGS)
 checks["SIGINT stops the build at once, not after the poll sleep"] = code == 130 and len(stops(calls)) == 1
@@ -140,6 +162,43 @@ checks["cleanup stops only the unfinished build and waits until it has stopped"]
 code, out, calls, evidence = finish(start("cleanup-noop", command, evidence=recorded + f"{DEPLOY}_status=FAILED\n",
                                           env=env), 30)
 checks["cleanup leaves finished builds alone"] = code == 0 and calls == []
+
+code, out, calls, evidence = finish(start("cleanup-recorded-none", command,
+                                          evidence=recorded + f"{DEPLOY}_status=None\n", env=env), 30)
+checks["cleanup stops a build whose recorded status is not terminal"] = code == 0 \
+    and stops(calls) == [f"codebuild stop-build --id {DEPLOY}:build-1"] \
+    and evidence.endswith(f"{DEPLOY}_status_after_stop=STOPPED\n")
+
+code, out, calls, evidence = finish(start("cleanup-none", command, evidence=recorded, env=env,
+                                          after_stop=["NOT_FOUND", "FAIL", "NOT_FOUND", "STOPPED"]), 30)
+checks["cleanup keeps waiting through read errors and statuses that are not terminal"] = code == 0 \
+    and len(stops(calls)) == 1 and evidence.endswith(f"{DEPLOY}_status_after_stop=STOPPED\n")
+
+# The same step with a 2-second stop wait, so the test need not sit out the step's 180 seconds.
+wait = "deadline=$((SECONDS + 180))"
+short = work / "Stop-unfinished-builds-short.sh"
+short.write_text(Path(command[-1]).read_text().replace(wait, "deadline=$((SECONDS + 2))"))
+code, out, calls, evidence = finish(start("cleanup-never-stops", ["bash", "-e", str(short)],
+                                          evidence=recorded, env=env, after_stop=["NOT_FOUND"]), 30)
+checks["cleanup fails if the build never reaches a terminal status"] = wait in Path(command[-1]).read_text() \
+    and code == 1 and f"{DEPLOY}:build-1 may still be running" in out \
+    and evidence.endswith(f"{DEPLOY}_status_after_stop=None\n")
+
+# Build.buildStatus is one of SUCCEEDED, FAILED, FAULT, TIMED_OUT, IN_PROGRESS or STOPPED (CodeBuild API
+# reference, API_Build.html). Every one but IN_PROGRESS ends both waits, and once recorded the cleanup
+# skips the build. A zero wait and the short cleanup make a missing status fail at once, not time out.
+for s in ("SUCCEEDED", "FAILED", "FAULT", "TIMED_OUT", "STOPPED"):
+    code, out, calls, evidence = finish(start(f"terminal-{s}", DEPLOY_ARGS, polls=[s, "IN_PROGRESS"],
+                                              env={"CODEBUILD_WAIT_MINUTES": "0"}), 30)
+    checks[f"{s} ends the runner's wait"] = not stops(calls) and f"{DEPLOY}_status={s}\n" in evidence \
+        and (code == 0 if s == "SUCCEEDED" else code == 1 and f"finished with status {s}" in out)
+    code, out, calls, evidence = finish(start(f"cleanup-recorded-{s}", command,
+                                              evidence=recorded + f"{DEPLOY}_status={s}\n", env=env), 30)
+    checks[f"cleanup leaves a build recorded as {s} alone"] = code == 0 and calls == []
+    code, out, calls, evidence = finish(start(f"cleanup-{s}", ["bash", "-e", str(short)], evidence=recorded,
+                                              env=env, after_stop=[s, "IN_PROGRESS"]), 30)
+    checks[f"{s} ends the cleanup's wait"] = code == 0 and len(stops(calls)) == 1 \
+        and evidence.endswith(f"{DEPLOY}_status_after_stop={s}\n")
 
 shutil.rmtree(work, ignore_errors=True)
 failed = [k for k, v in checks.items() if not v]

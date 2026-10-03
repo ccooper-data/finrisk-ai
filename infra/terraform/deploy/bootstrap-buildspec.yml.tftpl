@@ -35,9 +35,13 @@ phases:
 
         # Idempotent: a retry is not an exceptional path.
         "$K" create namespace "${namespace}" --dry-run=client -o yaml | "$K" apply -f -
-        # Pod Security Admission: the inference pod already meets the restricted profile.
+        # Pod Security Admission: the inference pod already meets the restricted profile. Warn is
+        # set explicitly (the API server would default it to enforce) because the deploy build's
+        # dry run fails on the warning this level returns for a violating Deployment.
         "$K" label namespace "${namespace}" --overwrite \
           pod-security.kubernetes.io/enforce=restricted \
-          pod-security.kubernetes.io/enforce-version=latest
+          pod-security.kubernetes.io/enforce-version=latest \
+          pod-security.kubernetes.io/warn=restricted \
+          pod-security.kubernetes.io/warn-version=latest
 
         echo "FINRISK_EVIDENCE bootstrap=complete namespace=${namespace}"
