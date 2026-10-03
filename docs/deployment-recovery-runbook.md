@@ -16,17 +16,17 @@ This runbook governs the bounded FinRisk-AI EKS validation deployment. It proves
 1. Derive the image tag `sha-<commit>` from the workflow's own commit and validate its format.
 2. Exchange GitHub OIDC identity for short-lived release-role credentials.
 3. Resolve the tag to an immutable ECR digest; fail if this commit has no image.
-4. Run the bootstrap CodeBuild project (cluster admin, no caller input): create the `finrisk` namespace and enforce Pod Security `restricted`.
+4. Run the bootstrap CodeBuild project (cluster admin, no caller input): create the `finrisk` namespace and enforce (and warn on) Pod Security `restricted`.
 5. Run the deploy CodeBuild project (edit rights in `finrisk` only) with the digest-pinned `FINRISK_IMAGE_URI` as its only input. Inside the VPC it:
    1. re-validates the URI against this account's repository and digest form;
    2. records the current Deployment revision as the rollback target (none only when the Deployment does not exist);
-   3. server-side dry-runs, then server-side applies the manifest;
+   3. server-side dry-runs the manifest, failing if Pod Security admission warns that its Pod template would violate `restricted` (enforce rejects Pods, not the Deployment, so this would otherwise fail only after the apply), then server-side applies it;
    4. waits for rollout completion and at least one ready replica;
    5. runs the in-pod smoke test: readiness and a prediction must both report the pinned model SHA-256, and the probability must be valid.
 6. Record each build's ID, status and `FINRISK_EVIDENCE` lines in the `finrisk-deployment-evidence` artifact. The workflow passes only if both builds succeed and log their final evidence lines (`bootstrap=complete`, then `result=deployed`).
 
 ## Failure sequence
-A failure before the apply (for example a rejected URI, an unreachable namespace, an unreadable revision or a failed dry run) stops the deploy build before anything changes. If apply, rollout, readiness or the smoke test fails, the deploy build:
+A failure before the apply (for example a rejected URI, an unreachable namespace, an unreadable revision, a failed dry run or a Pod Security warning on it) stops the deploy build before anything changes. If apply, rollout, readiness or the smoke test fails, the deploy build:
 1. Runs `rollout undo --to-revision` to the recorded revision and waits for that rollout; on a failed first deploy it deletes the Deployment instead.
 2. Logs `result=rolled_back` or `result=rollback_failed`, then exits 1, so the workflow stays failed even when recovery succeeds.
 3. The evidence artifact is uploaded on every outcome; preserve it and the CodeBuild log for root-cause analysis.

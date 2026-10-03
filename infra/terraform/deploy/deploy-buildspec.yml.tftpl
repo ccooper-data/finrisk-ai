@@ -88,7 +88,15 @@ phases:
         # NotFound means a first deploy; any other error stops here, before anything changes.
         PREV_REV="$("$K" -n "$NS" get deployment "$APP" --ignore-not-found -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')"
 
-        "$K" apply --server-side --field-manager=finrisk-codebuild --force-conflicts --dry-run=server -f /tmp/manifest.yaml
+        # Pod Security admission enforces on Pods, not on the Deployment: a Pod template that violates
+        # the namespace level passes this dry run with only a warning, then fails after the apply as
+        # ReplicaSet FailedCreate. Fail on that warning here, before anything changes. (Not
+        # --warnings-as-errors: any unrelated server warning would then block every deploy.)
+        "$K" apply --server-side --field-manager=finrisk-codebuild --force-conflicts --dry-run=server -f /tmp/manifest.yaml 2>&1 | tee /tmp/dry-run.log
+        if grep -qF "would violate PodSecurity" /tmp/dry-run.log; then
+          echo "manifest rejected: its Pod template violates the namespace's Pod Security level"
+          exit 1
+        fi
 
         # Every step checks its own status: set -e does not apply inside a function used as a condition.
         deploy_and_verify() {

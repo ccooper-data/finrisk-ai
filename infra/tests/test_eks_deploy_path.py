@@ -3,7 +3,6 @@
 import json
 import re
 import subprocess
-import tempfile
 from fnmatch import fnmatchcase
 from pathlib import Path
 
@@ -111,9 +110,8 @@ URI_CASES = {
     "": False,
     "unset": False,
 }
-with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
-    f.write(uri_script)
-uri_results = {v: "ACCEPTED" in subprocess.run(["bash", f.name, v], capture_output=True, text=True).stdout
+uri_results = {v: "ACCEPTED" in subprocess.run(["bash", "-c", uri_script, "uri-check", v],
+                                               capture_output=True, text=True).stdout
                for v in URI_CASES}
 
 runtime = json.loads(render(runtime_tpl, region=REGION, account_id=ACCOUNT,
