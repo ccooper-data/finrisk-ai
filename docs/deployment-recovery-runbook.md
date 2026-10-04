@@ -1,7 +1,7 @@
 # Deployment and Recovery Runbook
 
 ## Purpose
-This runbook governs the bounded FinRisk-AI EKS validation deployment. It proves controlled promotion and recovery without leaving a permanent portfolio environment running.
+This runbook governs the bounded FinRisk-AI EKS validation deployment. It covers controlled promotion, the deploy build's automated rollback, and verified teardown, without leaving a permanent portfolio environment running. Rollback is validated in CI against a fake kubectl; live failed-deploy rollback is not exercised in a bounded window.
 
 ## Preconditions
 - Phase 1–6 acceptance gates are green on the commit being promoted.
@@ -35,11 +35,11 @@ A failure before the apply (for example a rejected URI, an unreachable namespace
 If the result is `rollback_failed`, or the run was cancelled or timed out (the workflow then stops the unfinished build and waits for it to stop, which can interrupt an apply or a rollback; if it reports the build may still be running, wait for it before DESTROY), treat the environment as an incident and do not claim automated recovery succeeded. The EKS API is private and only the two CodeBuild roles have cluster access entries, so there is no operator kubectl path: preserve the evidence and DESTROY.
 
 ## Scaling validation
-The Phase-4 HPA contract is 1–3 inference replicas with a 70% CPU target. Live validation should demonstrate scale-out and subsequent stabilization only during the bounded EKS window. Worker capacity remains separately capped by Terraform.
+The Phase-4 HPA contract is 1–3 inference replicas with a 70% CPU target. Live scale-out is not exercisable in the bounded window: there is no load generator, and operators have no Kubernetes access to the private API to read replica counts. Record only that the metrics-server add-on is Active; a load test is V1.1 work. Worker capacity remains separately capped by Terraform.
 
 ## Teardown
 After evidence collection:
-1. Export required deployment/telemetry evidence.
+1. Save the window's workflow artifacts and export the CodeBuild logs (CloudWatch log group `/finrisk/codebuild/finrisk-ai-portfolio`). There is no runtime telemetry to export yet.
 2. Disable or destroy EKS, NAT, CloudWatch, and CloudTrail validation resources.
 3. Confirm Terraform plan no longer proposes retained billable runtime resources that were intended to be ephemeral.
 4. Record teardown time and cost snapshot.

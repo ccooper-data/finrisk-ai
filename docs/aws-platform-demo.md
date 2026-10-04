@@ -40,4 +40,6 @@ Explain the operating model:
 - **Why keep a failed workflow failed after rollback?** Recovery restores service state; it does not erase evidence that the candidate deployment failed.
 
 ## Evidence-language guardrail
-Until the bounded AWS validation run is executed, say **implemented and CI-validated** for EKS deployment, autoscaling, CloudWatch runtime telemetry, and rollback. Do not say those behaviors were live-tested in AWS.
+The 2026-10-03 window live-validated deployment and serving (see `docs/AWS_VALIDATION_CLOSEOUT.md`). You may say the inference service was deployed by digest to a private EKS cluster, became ready, served the pinned model with its SHA-256 verified in the pod, returned a live prediction, and was torn down with empty state verified.
+
+For autoscaling (HPA scale-out) and rollback, say **implemented and CI-validated**. For CloudWatch runtime telemetry, say the instrumentation and alarm definitions are CI-validated but nothing exports to CloudWatch yet. Do not say those behaviors were live-tested in AWS.
