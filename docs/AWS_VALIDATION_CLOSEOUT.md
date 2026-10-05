@@ -44,7 +44,7 @@ Recovery followed the contract. DESTROY run `37148135493` removed all 47 resourc
 - EKS cluster creation took **10m 46s**, the node group **1m 46s** and the metrics-server add-on **44s**.
 - Build Inference Image took about **1.5 minutes**, and Deploy FinRisk Inference about **3 minutes**.
 - DESTROY took about **13 minutes**, including **3m 37s** to delete the EKS cluster. The CodeBuild runner security group was deleted in 1 second, with no leftover network interface.
-- AWS cost, from Cost Explorer at least 24 hours after DESTROY, including the 1.5-hour failed attempt: **COST_SNAPSHOT_PENDING**.
+- AWS cost: Cost Explorer (unblended, no filters, at least 24 hours after DESTROY) reported an estimated net cost of **-$0.00** for 2026-10-03 to 2026-10-04, which includes the 1.5-hour failed attempt, and **-$0.00** for 2026-10-02 to 2026-10-04, which covers both windows. The figure is net of account credits and adjustments. The underlying EKS, NAT, EC2 and CodeBuild usage was small but not free; the credits offset it.
 
 ## First window (2026-10-02): infrastructure lifecycle
 
