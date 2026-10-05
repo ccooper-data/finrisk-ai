@@ -1,6 +1,6 @@
 # Bounded AWS EKS Validation Contract
 
-The first window (2026-10-02) proved infrastructure provisioning and teardown. The deploy path below adds application deployment to the private EKS API; it is CI/static-validated and has not yet been exercised in a live window.
+The first window (2026-10-02) proved infrastructure provisioning and teardown. The second window (2026-10-03) exercised the deploy path below end to end: the pinned model was deployed to the private EKS API and served a live prediction, then teardown was verified. The record is in `docs/AWS_VALIDATION_CLOSEOUT.md`.
 
 ## Success criteria
 
@@ -27,23 +27,23 @@ GitHub-hosted runners cannot reach the private EKS endpoint, so two CodeBuild pr
 
 The served model is pinned in `model/served-model.json` (source run, size, SHA-256). Changing it takes a reviewed commit, and the image build also checks that the training run's recorded Python, scikit-learn, numpy and pandas versions match `constraints/serving.txt`.
 
-Actions artifacts expire after 30 days. The pinned model artifact (run 37055204267) expires 2026-11-01, and the cohort artifact that retraining needs (run 36626740566) expires 2026-10-29. After that, rebuild the cohort, retrain, show prediction equivalence with the pinned model, and update the pin in a reviewed commit; never loosen the provenance checks.
+Training and cohort artifacts are kept for 30 days. The pinned model artifact (run 37055204267) expires 2026-11-01, and the cohort artifact that retraining needs (run 36626740566) expires 2026-10-29. After that, rebuild the cohort, retrain, show prediction equivalence with the pinned model, and update the pin in a reviewed commit; never loosen the provenance checks.
 
 ### One-time setup (administrator, before the next PLAN)
 
 1. Update `finrisk-ai-eks-boundary` to match `docs/aws-eks-boundary-policy.json`.
-2. Create the managed policy `finrisk-ai-deployer-deploy-path` from `docs/aws-deployer-deploy-path-policy.json` and attach it to `github-finrisk-deployer`.
+2. Create the managed policy `finrisk-ai-deployer-deploy-path` from `docs/aws-deployer-deploy-path-policy.json` and attach it to `github-finrisk-deployer`. Confirm the role's **Permissions** tab then lists both its inline policy and `finrisk-ai-deployer-deploy-path`. On 2026-10-03 the policy was created but not attached, and the first APPLY failed with AccessDenied on `iam:CreateRole` and `eks:CreateAddon`.
 3. Create the role `github-finrisk-releaser` with trust policy `docs/aws-release-trust-policy.json`, inline policy `docs/aws-release-policy.json`, and maximum session duration 2 hours.
 4. In GitHub, create the environment `portfolio-release` limited to `main`, with the variable `AWS_RELEASE_ROLE_ARN`.
 5. Optional, recommended: confirm with the IAM policy simulator that `StartBuild` requests carrying `BASH_ENV`, a buildspec override or an image override are denied, and that a request with only a digest-pinned `FINRISK_IMAGE_URI` is allowed.
 
 ### Window sequence
 
-PLAN, review, APPLY the reviewed plan, then **Build Inference Image** (the ECR repository exists only while the stack is up), then **Deploy FinRisk Inference**, then capture evidence and DESTROY. `main` stays frozen from PLAN to DESTROY: the deploy takes no image input and uses the image built from its own commit, and the deploy buildspec's expected model SHA-256 is fixed at PLAN time, so all three must be the same commit. The deploy shares the provision workflow's concurrency group, so a DESTROY never starts under a running in-VPC build.
+PLAN, review, APPLY the reviewed plan, then **Build Inference Image** (the ECR repository exists only while the stack is up), then **Deploy FinRisk Inference**, then capture evidence and DESTROY. `main` stays frozen from PLAN to DESTROY: the deploy takes no image input and uses the image built from its own commit, and the deploy buildspec's expected model SHA-256 is fixed at PLAN time, so all three must be the same commit. The deploy shares the provision workflow's concurrency group, so a manual DESTROY never starts under a running in-VPC build. The hourly reaper runs in its own group, so start the deploy promptly after APPLY; it then finishes well before the lease expires. Save the window's workflow artifacts (plan, provisioning, image and deployment evidence) and the CodeBuild logs before DESTROY: DESTROY deletes the CodeBuild log group and the image, and those artifacts expire after 7 days.
 
 ## Cost enforcement
 
-The primary control is a manual DESTROY as soon as the success criteria are met. The first window (2026-10-02) took about 45 minutes from APPLY to verified DESTROY.
+The primary control is a manual DESTROY as soon as the success criteria are met. The first window (2026-10-02) took about 45 minutes from APPLY to verified DESTROY, and the second (2026-10-03) about 47 minutes including the image build and deploy.
 
 APPLY writes a four-hour teardown lease to the private Terraform state bucket before creating runtime infrastructure. Four hours leaves room for the reaper's schedule and a 15-20 minute destroy inside a six-hour window. GitHub scheduled runs are best-effort, though: this repository has seen gaps of several hours between them, so the reaper is a backstop, not a guarantee. `reap-bounded-aws.yml` runs hourly in a separate concurrency group:
 
@@ -64,7 +64,7 @@ A manual DESTROY clears the lease once it has verified that state is empty.
 
 ## Recovery: DESTROY stuck on a subnet, security group, or VPC
 
-Rarely, the VPC CNI leaves a network interface in the `available` state after the nodes terminate. Terraform does not delete those itself, so deleting the subnet, security group, or VPC retries for up to 20 minutes and then fails. The NAT gateway, EIP and EKS resources are already gone by then, so the leftover network costs nothing. To recover, an administrator deletes the leftover interfaces in the VPC (EC2 console, **Network Interfaces**, filter by the VPC, status `available`), then runs DESTROY again. The same applies to an interface left by a CodeBuild runner (description starting `AWS CodeBuild`).
+Rarely, the VPC CNI leaves a network interface in the `available` state after the nodes terminate. Terraform does not delete those itself, so deleting the subnet, security group, or VPC retries for up to 20 minutes and then fails. For a VPC CNI interface, the NAT gateway, EIP and EKS resources are already gone by then, so the leftover network costs nothing. An interface left by a CodeBuild runner (description starting `AWS CodeBuild`) is different. The runner security group must be deleted before the runner role policies, and those policies reference the EKS cluster, so the cluster cannot be deleted until that interface is released. After a failed DESTROY, check whether `aws_eks_cluster.platform[0]` is still in state; if it is, it keeps billing until DESTROY completes. To recover, an administrator deletes the leftover interfaces in the VPC (EC2 console, **Network Interfaces**, filter by the VPC, status `available`), then runs DESTROY again.
 
 ## Permissions boundary
 

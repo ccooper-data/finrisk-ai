@@ -25,5 +25,5 @@ Do not lead with GRU layer sizes. Lead with decision quality: defining evidence 
 **Why AP instead of accuracy?** Distress is about 1%; accuracy is dominated by negatives. AP measures ranking quality for the rare positive class.
 **Why not claim the GRU beats the tree?** Point estimates differ, but paired issuer-cluster intervals cross zero.
 **Why exclude recent known positives?** Their non-event counterparts are still censored; retaining only observable positives would create a selectively observed recent tail.
-**Is it deployed?** No. It is a production-shaped research pipeline with auditable controls, not a production financial decision service.
+**Is it deployed?** Only in bounded, private validation windows that were torn down afterward. The pinned model was deployed to a private EKS cluster and served a verified prediction on 2026-10-03, then destroyed. It is a production-shaped research pipeline with auditable controls, not a production financial decision service.
 **What would you do next in a real organization?** Establish an independently refreshed outcome source, prospective monitoring, retraining/calibration governance, drift controls, and decision-specific operating thresholds before production use.

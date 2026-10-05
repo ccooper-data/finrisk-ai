@@ -28,7 +28,7 @@ A runtime validation record should bind:
 3. Model artifact SHA-256.
 4. EKS deployment revision.
 5. Validation start/end timestamps.
-6. SLI measurements and alarm state.
+6. SLI measurements and alarm state, once an OpenTelemetry exporter and log shipping exist (V1.1). Until then the alarms have no data source and read OK by default, so their state is not evidence.
 7. Teardown evidence.
 
 These SLOs are engineering validation objectives, not claims of measured 24/7 production availability.

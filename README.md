@@ -37,9 +37,15 @@ The portfolio cloud architecture has been exercised against a real AWS account, 
 - Deployment promotion applies the exact reviewed binary plan after provenance and SHA-256 verification.
 - EKS uses a private API endpoint, scoped bootstrap permissions, and per-role permissions boundaries.
 - Cost controls combine AWS Budget alerts with a persisted teardown lease and an independent scheduled reaper.
-- Commit `d0096e9536b3b77597fc820ac391abccb0951c09` was exercised in the bounded live-AWS validation window: reviewed APPLY, reaper check, DESTROY, and final empty-state verification all completed successfully.
-- Post-validation hardening commit `4361a69c54280537b1c8f1351eb2b4062b0dd257` is CI/static-validated; it was not the commit exercised during the live AWS window.
-- Application deployment to the private EKS API goes through in-VPC CodeBuild runners with namespace-scoped access and a pinned model. This path is CI/static-validated and has not yet been exercised in a live window.
+- Commit `d0096e9536b3b77597fc820ac391abccb0951c09` was exercised in the first bounded live-AWS validation window (2026-10-02): reviewed APPLY, reaper check, DESTROY, and final empty-state verification all completed successfully.
+- Post-validation hardening commit `4361a69c54280537b1c8f1351eb2b4062b0dd257` was not exercised in the first window. It is included in commit `b83a3656d9c7e25c5d61f1e4accfac519585197d`, which the second window exercised.
+- Application deployment to the private EKS API goes through two in-VPC CodeBuild runners with fixed buildspecs and a pinned model: a bootstrap runner (`AmazonEKSClusterAdminPolicy`, cluster scope) that only creates the `finrisk` namespace, and a deploy runner (`AmazonEKSEditPolicy`) scoped to that namespace. A second bounded window (2026-10-03, commit `b83a3656d9c7e25c5d61f1e4accfac519585197d`) exercised it end to end:
+  - the production image built from the pinned model was deployed by digest;
+  - the pod became Ready and served the pinned model, with its SHA-256 verified in the pod;
+  - a live prediction came back through the in-cluster Service;
+  - all 60 resources were destroyed, and empty state was verified.
+- HPA scale-out and live failed-deploy rollback were not exercised in AWS; they remain implemented and CI-validated only.
+- CloudWatch runtime telemetry was not exercised and is not implemented end to end. The OpenTelemetry instrumentation and the CloudWatch alarm definitions are CI-validated, but nothing exports to CloudWatch yet: there is no exporter and no log shipping (V1.1 backlog).
 
 See [AWS validation closeout](docs/AWS_VALIDATION_CLOSEOUT.md) and [bounded AWS validation contract](docs/bounded-aws-validation.md).
 
