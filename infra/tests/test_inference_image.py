@@ -16,7 +16,13 @@ constraints = (ROOT / "constraints/serving.txt").read_text()
 build = (ROOT / ".github/workflows/build-inference-image.yml").read_text()
 manifest = (ROOT / "infra/k8s/inference.yaml").read_text()
 trainer = ast.parse((ROOT / "src/finrisk/modeling/boosted_tree.py").read_text())
-pinned = dict(re.findall(r"^([a-z0-9-]+)==([0-9.]+)$", constraints, re.M))
+# The training pins, then the libraries behind GET /metrics under their own header.
+training_pins, telemetry_header, telemetry_pins = constraints.partition("\n# Telemetry stack")
+pinned = dict(re.findall(r"^([a-z0-9-]+)==([0-9.]+)$", training_pins, re.M))
+telemetry = {"opentelemetry-api", "opentelemetry-sdk", "opentelemetry-instrumentation-fastapi",
+             "opentelemetry-exporter-prometheus", "prometheus-client"}
+# One exact version per line (OpenTelemetry contrib ships betas such as 0.66b0): no wildcard or marker.
+exact_pin = r"^([a-z0-9-]+)==[0-9]+(?:\.[0-9]+)*(?:b[0-9]+)?$"
 
 # PR container validation: PyYAML reads the bare `on:` key as True.
 validate = yaml.safe_load((ROOT / ".github/workflows/container-validate.yml").read_text())
@@ -99,15 +105,24 @@ tag = re.search(r'--tag "([^"]+)"', validate_runs[built]).group(1) if built >= 0
 boot = step("docker run -d", "/health/live")
 boot_options, _, boot_args = (docker_runs(boot) or [NO_RUN])[0]
 # The commands, not just their words: cleanup armed first, a curl --max-time poll of /health/live
-# that a deadline ends with exit 1, then the exact live body and the not-ready answer.
+# that a deadline ends with exit 1, then the exact live body and the not-ready answer, whose
+# mismatch is an ::error:: and exit 1 (a warning would let it pass).
 boot_probes = [
     r"^trap '[^']*docker logs candidate[^']*docker rm -f candidate[^']*' EXIT\n",
     r'\ndeadline=\$\(\(SECONDS \+ \d+\)\)\nuntil \[ "\$\(curl [^\n]*--max-time \d+ http://127\.0\.0\.1:8000/health/live\)" = "200" \]; do\n',
     r'\n *if \[ "\$running" != "true" \] \|\| \[ "\$SECONDS" -ge "\$deadline" \]; then\n *echo "::error::',
     r"""\njq -e '\. == \{"status": "ok"\}' live\.json\n""",
     r'\ncode="\$\(curl [^\n]*-o ready\.json [^\n]*--max-time \d+ http://127\.0\.0\.1:8000/health/ready\)"\n',
-    rf"""\nif \[ "\$code" != "503" \] \|\| ! jq -e '\.detail == "Model artifact not found: {re.escape(model_path)}"' ready\.json[^\n]*; then\n""",
+    (rf"""\nif \[ "\$code" != "503" \] \|\| ! jq -e '\.detail == "Model artifact not found: {re.escape(model_path)}"' ready\.json >/dev/null; then\n"""
+     r' +echo "::error::[^\n]*\n +exit 1\nfi\n'),
 ]
+# /metrics answers 200 and counts the /health/live probes, which the check requires to come first. It
+# is the step's last command, so no enclosing if, loop or heredoc can skip it.
+metrics_probe = (
+    r"""\ncode="\$\(curl -s -o metrics\.txt -w '%\{http_code\}' --max-time \d+ http://127\.0\.0\.1:8000/metrics\)"\n"""
+    r"""if \[ "\$code" != "200" \] \|\| ! grep -q '\^http_server_duration_milliseconds_count\{\[\^\}\]\*http_target="/health/live"' metrics\.txt; then\n"""
+    r' +echo "::error::[^\n]*\n +exit 1\nfi\n?\Z'
+)
 
 imports = step("pip check")
 import_runs = docker_runs(imports)
@@ -124,6 +139,11 @@ heredoc = stand_in_lines[1 + next((n for n, l in enumerate(stand_in_lines) if l.
 stand_in_tree = ast.parse("\n".join(heredoc[:-1]) if heredoc[-1:] == ["PY"] and "PY" not in heredoc[:-1] else "")
 stand_in_calls = {ast.unparse(n.func) for n in ast.walk(stand_in_tree) if isinstance(n, ast.Call)}
 stand_in_asserts = [ast.unparse(n.test) for n in ast.walk(stand_in_tree) if isinstance(n, ast.Assert)]
+# Every value each name is assigned in the heredoc, so the /metrics counts trace back to the scrape.
+stand_in_assigned = {}
+for n in ast.walk(stand_in_tree):
+    for t in n.targets if isinstance(n, ast.Assign) else []:
+        stand_in_assigned.setdefault(ast.unparse(t), []).append(ast.unparse(n.value))
 
 checks = {
     "pin names run, artifact, size and sha256": set(pin) == {"source_workflow", "model_run_id", "artifact_name", "file", "size_bytes", "sha256"}
@@ -138,6 +158,9 @@ checks = {
     "image tags are never overwritten": "already exists" in build,
     "serving libraries pinned to the training versions": {"scikit-learn", "numpy", "pandas", "scipy", "joblib"} <= set(pinned)
         and "-c /app/constraints/serving.txt" in dockerfile,
+    "telemetry libraries behind /metrics pinned exactly, apart from the training pins": bool(telemetry_header)
+        and set(re.findall(exact_pin, telemetry_pins, re.M)) == telemetry
+        and not telemetry & set(re.findall(r"^([a-z0-9-]+)", training_pins, re.M)),
     "Python matches training (3.12)": dockerfile.splitlines()[[i for i, l in enumerate(dockerfile.splitlines()) if l.startswith("FROM ")][0]] == "FROM python:3.12-slim",
     "numeric non-root user (runAsNonRoot can verify it)": "USER 10001:10001" in dockerfile
         and "runAsUser: 10001" in manifest and "runAsGroup: 10001" in manifest,
@@ -157,6 +180,9 @@ checks = {
         and {"-d", "--name candidate", "-p 127.0.0.1:8000:8000", "--read-only", "--tmpfs /tmp", "--cap-drop ALL",
             "--security-opt no-new-privileges", f"--memory {docker_memory}"} <= set(boot_options)
         and boot_args == [] and all(re.search(p, validate_runs[boot]) for p in boot_probes),
+    "PR CI serves /metrics from the read-only image without a model": 0 <= built < boot and enforced(boot)
+        and re.search(metrics_probe, validate_runs[boot]) is not None
+        and -1 < validate_runs[boot].find("8000/health/live") < validate_runs[boot].find("8000/metrics"),
     "PR CI checks requirements and imports the model's modules inside the image": 0 <= built < imports and enforced(imports)
         and any("--entrypoint python" in o and a == ["-m", "pip", "check"] for o, _, a in import_runs)
         and {"finrisk.serving", "sklearn.ensemble", "sklearn.impute", "scipy", "numpy", "pandas", "joblib"} <= imported,
@@ -165,6 +191,11 @@ checks = {
         and any(o.startswith("-e FINRISK_MODEL_PATH=/tmp/") for o in stand_in_options) and stand_in_args[:1] == ["-"]
         and {"serving.readiness", "serving.predict"} <= stand_in_calls
         and all(any(n in a for a in stand_in_asserts) for n in ("model_sha256", "distress_12m_probability", "status_code == 422")),
+    "PR CI reads the stand-in's predictions, errors and latency back from /metrics": 0 <= built < stand_in and enforced(stand_in)
+        and stand_in_assigned.get("scraped") == ["serving.prometheus_metrics(Request({'type': 'http', 'headers': []})).body.decode()"]
+        and stand_in_assigned.get("exported") == ["{s.name: s.value for f in text_string_to_metric_families(scraped) for s in f.samples}"]
+        and {f"exported.get('{n}') == {v}" for n, v in (("finrisk_predictions_total", 2), ("finrisk_prediction_errors_total", 1),
+             ("finrisk_inference_duration_milliseconds_count", 3))} <= set(stand_in_asserts),
     "stand-in model has the estimator types and bundle training dumps": len(bundle_shape(trainer)) == 3
         and bundle_shape(trainer) == bundle_shape(stand_in_tree),
     "PR container validation runs for every file the image copies": {"Dockerfile", ".dockerignore"} <= set(validate_paths)

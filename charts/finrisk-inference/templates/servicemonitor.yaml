@@ -1,0 +1,18 @@
+{{- if .Values.serviceMonitor.enabled }}
+# The Prometheus Operator scrapes /metrics on every ready Pod behind the Service's http port.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "finrisk-inference.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "finrisk-inference.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "finrisk-inference.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  endpoints:
+    - port: http
+      path: /metrics
+{{- end }}

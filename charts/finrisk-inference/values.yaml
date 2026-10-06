@@ -1,0 +1,12 @@
+# The image is referenced by digest only: there is no tag value, and the schema rejects one.
+# Both values are required; the chart does not render without them.
+image:
+  # Registry and repository, e.g. <account>.dkr.ecr.<region>.amazonaws.com/finrisk-ai-inference.
+  repository: ""
+  # sha256:<64 lowercase hex>, set per deploy.
+  digest: ""
+
+# Prometheus Operator scrape of /metrics through the Service's http port. Needs the operator's
+# ServiceMonitor CRD in the cluster.
+serviceMonitor:
+  enabled: false

@@ -8,3 +8,12 @@ pandas==3.0.6
 scipy==1.18.1
 joblib==1.6.0
 pyarrow==25.0.1
+
+# Telemetry stack, separate from the training pins above: the OpenTelemetry release behind
+# GET /metrics. Core 1.45.0 and contrib 0.66b0 ship as one release and pin the remaining
+# opentelemetry-* packages exactly, so these change together.
+opentelemetry-api==1.45.0
+opentelemetry-sdk==1.45.0
+opentelemetry-instrumentation-fastapi==0.66b0
+opentelemetry-exporter-prometheus==0.66b0
+prometheus-client==0.26.0

@@ -8,17 +8,29 @@ from typing import Any
 
 import joblib
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from opentelemetry import metrics, trace
+from opentelemetry.exporter.prometheus import PrometheusMetricReader
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.view import View
 from opentelemetry.sdk.trace import TracerProvider
+from prometheus_client import REGISTRY
+from prometheus_client.exposition import choose_encoder
 
 MODEL_PATH = Path(os.getenv("FINRISK_MODEL_PATH", "/app/model/boosted_tree_model.joblib"))
 
 trace.set_tracer_provider(TracerProvider())
-metrics.set_meter_provider(MeterProvider())
+# The reader registers with prometheus_client's in-process registry, which GET /metrics serves; with
+# one uvicorn worker (Dockerfile CMD) no multiprocess directory is needed on the read-only root.
+# HTTP server metrics keep only bounded labels: the client-supplied Host header (http.host,
+# http.server.name, net.host.*) would let any caller mint new series.
+metrics.set_meter_provider(MeterProvider(
+    metric_readers=[PrometheusMetricReader()],
+    views=[View(instrument_name="http.server.*",
+                attribute_keys={"http.method", "http.status_code", "http.target"})],
+))
 tracer = trace.get_tracer("finrisk.serving")
 meter = metrics.get_meter("finrisk.serving")
 prediction_counter = meter.create_counter("finrisk.predictions", unit="1")
@@ -129,3 +141,20 @@ def predict(request: PredictionRequest) -> dict[str, Any]:
         "distress_12m_probability": probability,
         "model_sha256": bundle.sha256,
     }
+
+
+# The instruments above and FastAPIInstrumentor's HTTP server metrics, in the format the scraper's
+# Accept header asks for, as prometheus_client.make_asgi_app negotiates it (mounting that app would
+# answer /metrics with a 307 to /metrics/). A family appears once it has data:
+#   from start-up: target_info, python_gc_*, python_info, process_* (Linux)
+#   from the first request: http_server_active_requests
+#   after the first response: http_server_duration_milliseconds, http_server_response_size_bytes
+#     and, once a request has a body, http_server_request_size_bytes (histograms by http_method,
+#     http_status_code and http_target: the route template, which keeps probes and scrapes apart)
+#   after the first prediction attempt: finrisk_inference_duration_milliseconds (histogram)
+#   after the first successful prediction: finrisk_predictions_total
+#   after the first failed prediction: finrisk_prediction_errors_total{error_type}
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics(request: Request) -> Response:
+    encoder, content_type = choose_encoder(request.headers.get("accept", ""))
+    return Response(encoder(REGISTRY), media_type=content_type)

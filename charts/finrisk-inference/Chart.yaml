@@ -1,0 +1,6 @@
+apiVersion: v2
+name: finrisk-inference
+description: FinRisk inference API (Deployment, Service, HPA and an optional ServiceMonitor) in an existing namespace.
+type: application
+version: 0.1.0
+appVersion: "0.4.0"
