@@ -5,6 +5,7 @@ on:
     paths:
       - "infra/terraform/**"
       - "infra/k8s/**"
+      - "charts/**"
       - "infra/tests/**"
       - ".github/workflows/terraform-validate.yml"
       - ".github/workflows/provision-bounded-aws.yml"
@@ -92,6 +93,17 @@ jobs:
         run: python infra/tests/test_deploy_buildspec_runtime.py
       - name: Inference image acceptance
         run: python infra/tests/test_inference_image.py
+      - name: Inference chart static acceptance
+        run: python infra/tests/test_inference_chart.py
+      # Pinned, checksum-verified helm and kubeconform for the chart acceptance, which fails without them.
+      - name: Install pinned helm and kubeconform
+        env:
+          K8S_TOOLS: ${{ runner.temp }}/k8s-tools
+        run: bash .github/scripts/install-k8s-tools.sh "$K8S_TOOLS"
+      - name: Inference chart acceptance (lint, kubeconform, Pod Security, manifest parity)
+        env:
+          K8S_TOOLS: ${{ runner.temp }}/k8s-tools
+        run: python infra/tests/check_inference_chart.py
       - name: Cloud security acceptance
         run: python infra/tests/test_security_foundation.py
       - name: Observability and SLO acceptance

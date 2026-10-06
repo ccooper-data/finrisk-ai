@@ -1,22 +1,22 @@
-# Applied by the deploy CodeBuild project, whose access is AmazonEKSEditPolicy scoped to the
-# finrisk namespace. The namespace itself is created by the bootstrap project (cluster scope).
-# charts/finrisk-inference renders these same objects; infra/tests/check_inference_chart.py keeps
-# the two in parity, so change both together.
+# The namespace is the release's, created by the bootstrap project (cluster scope); the chart
+# never creates it.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: finrisk-inference
-  namespace: finrisk
+  name: {{ include "finrisk-inference.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "finrisk-inference.labels" . | nindent 4 }}
 spec:
   # No spec.replicas: the HPA owns the replica count, and re-applying a fixed value would fight it.
   progressDeadlineSeconds: 240
   selector:
     matchLabels:
-      app: finrisk-inference
+      {{- include "finrisk-inference.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        app: finrisk-inference
+        {{- include "finrisk-inference.selectorLabels" . | nindent 8 }}
     spec:
       # The app never calls the Kubernetes API.
       automountServiceAccountToken: false
@@ -33,7 +33,8 @@ spec:
             sizeLimit: 64Mi
       containers:
         - name: inference
-          image: FINRISK_IMAGE_PLACEHOLDER
+          # By digest only; values.schema.json rejects anything but sha256:<64 hex>.
+          image: "{{ required "image.repository is required" .Values.image.repository }}@{{ required "image.digest is required" .Values.image.digest }}"
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
@@ -64,42 +65,3 @@ spec:
               port: 8000
             initialDelaySeconds: 5
             periodSeconds: 10
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: finrisk-inference
-  namespace: finrisk
-spec:
-  selector:
-    app: finrisk-inference
-  ports:
-    # Named for the chart's ServiceMonitor. The target stays a number: a rollout undo restores only
-    # the Deployment, and an older Pod template need not name its port.
-    - name: http
-      port: 80
-      targetPort: 8000
-  type: ClusterIP
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: finrisk-inference
-  namespace: finrisk
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: finrisk-inference
-  minReplicas: 1
-  maxReplicas: 3
-  behavior:
-    scaleDown:
-      stabilizationWindowSeconds: 300
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 70

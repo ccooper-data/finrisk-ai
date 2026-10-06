@@ -48,8 +48,9 @@ jobs:
 
       # Runs the image as infra/k8s/inference.yaml does: read-only root, writable /tmp, no
       # capabilities, no privilege escalation, the same memory limit. A PR checkout has no model
-      # file (model/.gitignore), so the service must be live and report not ready. The probe
-      # deadline ends the step; timeout-minutes is the backstop if a command itself hangs.
+      # file (model/.gitignore), so the service must be live, report not ready and still serve
+      # /metrics. The probe deadline ends the step; timeout-minutes is the backstop if a command
+      # itself hangs.
       - name: Boot the image read-only and probe health
         timeout-minutes: 5
         run: |
@@ -71,6 +72,13 @@ jobs:
             echo "::error::/health/ready returned $code $(cat ready.json); with no model file it must be 503, model not found"
             exit 1
           fi
+          # The HTTP server histogram exists once a request has completed, so the probes above put
+          # /health/live in it.
+          code="$(curl -s -o metrics.txt -w '%{http_code}' --max-time 5 http://127.0.0.1:8000/metrics)"
+          if [ "$code" != "200" ] || ! grep -q '^http_server_duration_milliseconds_count{[^}]*http_target="/health/live"' metrics.txt; then
+            echo "::error::/metrics returned $code; it must be 200 and count the /health/live requests"
+            exit 1
+          fi
 
       # The pinned model never enters a PR checkout. A stand-in with the same estimator types and
       # bundle contract (finrisk.modeling.boosted_tree) goes through the serving code's load and
@@ -83,7 +91,8 @@ jobs:
             --entrypoint python "finrisk-ai:sha-${GITHUB_SHA}" - <<'PY'
           import hashlib, os
           import joblib, numpy as np, pandas as pd
-          from fastapi import HTTPException
+          from fastapi import HTTPException, Request
+          from prometheus_client.parser import text_string_to_metric_families
           from sklearn.ensemble import HistGradientBoostingClassifier
           from sklearn.impute import SimpleImputer
 
@@ -109,6 +118,12 @@ jobs:
               raise AssertionError("a request missing features was accepted")
           except HTTPException as exc:
               assert exc.status_code == 422, exc.detail
+          # The /metrics handler on the pinned exporter: two predictions served, one rejected, all timed.
+          scraped = serving.prometheus_metrics(Request({"type": "http", "headers": []})).body.decode()
+          exported = {s.name: s.value for f in text_string_to_metric_families(scraped) for s in f.samples}
+          assert exported.get("finrisk_predictions_total") == 2, scraped
+          assert exported.get("finrisk_prediction_errors_total") == 1, scraped
+          assert exported.get("finrisk_inference_duration_milliseconds_count") == 3, scraped
           print("stand-in model served:", ready)
           PY
 
