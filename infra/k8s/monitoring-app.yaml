@@ -1,0 +1,124 @@
+# Lean kube-prometheus-stack 91.9.0 (operator v0.94.1, whose ServiceMonitor schema CI validates the
+# app chart against), applied by the bootstrap build and synced by Argo CD from its OCI manifest
+# digest. Three Pods: operator, kube-state-metrics, Prometheus. No Alertmanager, Grafana, exporters,
+# rules, webhooks, hooks or PersistentVolume: evidence is read in the window that produced it.
+# check_monitoring_stack.py renders exactly this valuesObject, and binds the digest to the chart
+# through the OCI manifest .github/scripts/install-k8s-tools.sh fetches by it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: finrisk-monitoring
+  namespace: argocd
+  annotations:
+    # CRD defaulting after a server-side apply is not drift.
+    argocd.argoproj.io/compare-options: ServerSideDiff=true
+  # No finalizer: nothing here creates AWS resources, and DESTROY removes the cluster.
+spec:
+  project: finrisk-monitoring
+  source:
+    repoURL: oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack
+    targetRevision: sha256:04047e500c803dc8d2bc284ecb43e9229bb32b5c36bd13fc89592c8a2f3cdc72
+    path: .
+    helm:
+      releaseName: monitoring
+      valuesObject:
+        # Prometheus "monitoring" (StatefulSet prometheus-monitoring), Services monitoring-prometheus
+        # and monitoring-kube-state-metrics: the names the bootstrap and the deploy evidence use.
+        fullnameOverride: monitoring
+        cleanPrometheusOperatorObjectNames: true
+        crds:
+          enabled: true
+          upgradeJob:
+            enabled: false
+        defaultRules:
+          create: false
+        alertmanager:
+          enabled: false
+        grafana:
+          enabled: false
+        nodeExporter:
+          enabled: false
+        windowsMonitoring:
+          enabled: false
+        thanosRuler:
+          enabled: false
+        # No control-plane or kubelet scrapes.
+        kubernetesServiceMonitors:
+          enabled: false
+        # Images by digest: this subchart takes the "sha256:" prefix; the parent chart adds it to the rest.
+        kube-state-metrics:
+          image:
+            sha: "sha256:42cfe3723a5f058171c627537fb57a3ea0f26e4380fa18555a95cb1a1b4cfc5b"
+          # No cluster-wide Secret or ConfigMap reads.
+          collectors: [deployments, horizontalpodautoscalers, jobs, namespaces, nodes, pods, replicasets, services, statefulsets]
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 128Mi}
+        prometheusOperator:
+          # No webhooks, so no certificate Jobs or Secrets, and no TLS for them.
+          admissionWebhooks:
+            enabled: false
+          tls:
+            enabled: false
+          # Otherwise the operator writes a kubelet Service into kube-system.
+          kubeletService:
+            enabled: false
+          image:
+            sha: 7c88d4e7bae63bd8d0f8da986054337c23b4472fa8d3c6817f5bc4b8407a2d6a
+          prometheusConfigReloader:
+            image:
+              sha: 06b52bd4dbe3ed6dd5905aadaf8b9987d9da4c31d37bb86deaadae68cee2d26b
+            resources:
+              requests: {cpu: 10m, memory: 32Mi}
+              limits: {memory: 64Mi}
+          # Unused (no Thanos), but passed to the operator as a default image.
+          thanosImage:
+            sha: b567818fe608067eb0f1d7c2c4fe361e7ad83c8a256234c97685f1d0bf670cc8
+          resources:
+            requests: {cpu: 20m, memory: 64Mi}
+            limits: {memory: 256Mi}
+        prometheus:
+          serviceAccount:
+            createTokenSecret: false
+          prometheusSpec:
+            image:
+              sha: b2a413d5a03ea6a76782a508d1c7947440bba3b973931a25676e278431891b01
+            # Reload by signal. The HTTP default adds --web.enable-lifecycle: an unauthenticated
+            # POST /-/quit and /-/reload that every Pod in the cluster can reach.
+            reloadStrategy: ProcessSignal
+            # A ServiceMonitor can neither read Prometheus's files (its token) nor select other namespaces.
+            arbitraryFSAccessThroughSMs:
+              deny: true
+            ignoreNamespaceSelectors: true
+            # Every ServiceMonitor in finrisk (the app chart's) and monitoring, whatever its labels.
+            serviceMonitorSelectorNilUsesHelmValues: false
+            serviceMonitorNamespaceSelector:
+              matchExpressions:
+                - key: kubernetes.io/metadata.name
+                  operator: In
+                  values: [finrisk, monitoring]
+            retention: 12h
+            retentionSize: 512MB
+            storageSpec:
+              emptyDir:
+                sizeLimit: 1Gi
+            resources:
+              requests: {cpu: 50m, memory: 160Mi}
+              limits: {memory: 1Gi}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      enabled: true
+      prune: true
+      selfHeal: true
+    # The largest CRDs exceed the client-side apply annotation limit. Never Replace=true.
+    syncOptions:
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 2m

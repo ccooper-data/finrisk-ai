@@ -2,24 +2,43 @@
 #
 # GitHub-hosted runners cannot reach the private endpoint, so two CodeBuild projects run inside
 # the private subnets with fixed, reviewed buildspecs:
-#   - k8s-bootstrap: AmazonEKSClusterAdminPolicy (cluster scope); only creates the namespace.
+#   - k8s-bootstrap: AmazonEKSClusterAdminPolicy (cluster scope); creates the namespaces and the
+#                    exposure guard, installs Argo CD and has it sync the lean Prometheus stack.
 #   - k8s-deploy:    AmazonEKSEditPolicy scoped to the app namespace; applies, verifies, rolls back.
 # The GitHub release role may only start these builds; it cannot edit them (see
-# docs/aws-release-policy.json).
+# docs/aws-release-policy.json). Every value in both buildspecs is known at PLAN, so the reviewed
+# plan text shows them in full (infra/tests/test_eks_deploy_path.py).
 
 locals {
-  k8s_cluster_name      = "${var.project_name}-${var.environment}"
-  k8s_app_namespace     = "finrisk"
-  k8s_app_name          = "finrisk-inference"
-  k8s_bootstrap_project = "${var.project_name}-${var.environment}-k8s-bootstrap"
-  k8s_deploy_project    = "${var.project_name}-${var.environment}-k8s-deploy"
-  codebuild_log_group   = "/finrisk/codebuild/${var.project_name}-${var.environment}"
-  codebuild_image       = "aws/codebuild/amazonlinux-x86_64-standard:5.0"
-  account_id            = data.aws_caller_identity.current.account_id
+  k8s_cluster_name         = "${var.project_name}-${var.environment}"
+  k8s_app_namespace        = "finrisk"
+  k8s_argocd_namespace     = "argocd"
+  k8s_monitoring_namespace = "monitoring"
+  k8s_app_name             = "finrisk-inference"
+  k8s_bootstrap_project    = "${var.project_name}-${var.environment}-k8s-bootstrap"
+  k8s_deploy_project       = "${var.project_name}-${var.environment}-k8s-deploy"
+  codebuild_log_group      = "/finrisk/codebuild/${var.project_name}-${var.environment}"
+  codebuild_image          = "aws/codebuild/amazonlinux-x86_64-standard:5.0"
+  account_id               = data.aws_caller_identity.current.account_id
 
   # Latest 1.35 patch; checksum from https://dl.k8s.io/release/v1.35.9/bin/linux/amd64/kubectl.sha256
   kubectl_version = "v1.35.9"
   kubectl_sha256  = "3cfeaf80be482b435b0aa214aff6e0b2c312ee23c0ff20810c75517b6004c6eb"
+
+  # The helm CI renders the charts with (.github/scripts/install-k8s-tools.sh pins the same values);
+  # checksum from https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz.sha256sum
+  helm_version = "v4.3.0"
+  helm_sha256  = "86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb"
+  # argo-cd chart (Argo CD v3.5.3), the GitHub release asset of argoproj/argo-helm; the same bytes
+  # as the chart layer of its OCI artifact. Bump only together with the image digests in
+  # infra/k8s/argocd-values.yaml.
+  argocd_chart_version = "10.9.6"
+  argocd_chart_sha256  = "6eda90bdd18de538511c9b9aca1ca7ba7a1ca5b919f598714d0e91cd7155d119"
+
+  # The infra/k8s files the bootstrap applies, embedded as one compressed bundle (a "#==> <file>"
+  # line before each); the build checks every file against its own sha256, shown in the plan.
+  k8s_manifests       = "${path.module}/../k8s"
+  k8s_bootstrap_files = ["cluster-guards.yaml", "argocd-values.yaml", "argocd-projects.yaml", "monitoring-app.yaml"]
 
   served_model = jsondecode(file("${path.module}/../../model/served-model.json"))
 
@@ -181,9 +200,9 @@ resource "aws_codebuild_project" "k8s_bootstrap" {
   count = var.enable_eks ? 1 : 0
 
   name                   = local.k8s_bootstrap_project
-  description            = "Creates the ${local.k8s_app_namespace} namespace on the private EKS cluster"
+  description            = "Installs the namespaces, exposure guard, Argo CD and the lean Prometheus stack on the private EKS cluster"
   service_role           = aws_iam_role.codebuild_bootstrap[0].arn
-  build_timeout          = 15
+  build_timeout          = 25
   queued_timeout         = 10
   concurrent_build_limit = 1
 
@@ -201,12 +220,25 @@ resource "aws_codebuild_project" "k8s_bootstrap" {
 
   source {
     type = "NO_SOURCE"
+    # Only values known at PLAN: no attribute of a resource created by this apply.
     buildspec = templatefile("${path.module}/deploy/bootstrap-buildspec.yml.tftpl", {
-      cluster_name    = local.k8s_cluster_name
-      region          = var.aws_region
-      namespace       = local.k8s_app_namespace
-      kubectl_version = local.kubectl_version
-      kubectl_sha256  = local.kubectl_sha256
+      cluster_name           = local.k8s_cluster_name
+      region                 = var.aws_region
+      namespace              = local.k8s_app_namespace
+      argocd_namespace       = local.k8s_argocd_namespace
+      monitoring_namespace   = local.k8s_monitoring_namespace
+      node_instance_type     = var.eks_node_instance_types[0]
+      kubectl_version        = local.kubectl_version
+      kubectl_sha256         = local.kubectl_sha256
+      helm_version           = local.helm_version
+      helm_sha256            = local.helm_sha256
+      argocd_chart_version   = local.argocd_chart_version
+      argocd_chart_sha256    = local.argocd_chart_sha256
+      k8s_bundle_b64         = base64gzip(join("", [for f in local.k8s_bootstrap_files : "#==> ${f}\n${file("${local.k8s_manifests}/${f}")}"]))
+      cluster_guards_sha256  = filesha256("${local.k8s_manifests}/cluster-guards.yaml")
+      argocd_values_sha256   = filesha256("${local.k8s_manifests}/argocd-values.yaml")
+      argocd_projects_sha256 = filesha256("${local.k8s_manifests}/argocd-projects.yaml")
+      monitoring_app_sha256  = filesha256("${local.k8s_manifests}/monitoring-app.yaml")
     })
   }
 

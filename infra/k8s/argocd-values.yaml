@@ -1,0 +1,72 @@
+# Values for the argo-cd chart (pinned in infra/terraform/deploy_path.tf and install-k8s-tools.sh),
+# installed by the bootstrap build. Headless: the application controller, repo-server and Redis run;
+# the API server and ApplicationSet controller run zero replicas; no Dex or notifications. Nothing
+# is exposed and nobody logs in. check_argocd_install.py renders the chart with this file.
+
+# Both images by digest.
+global:
+  image:
+    repository: quay.io/argoproj/argocd
+    tag: "v3.5.3@sha256:dd3f47d5a5e4da563a7a398506e892481b358a7cec50abdf320c71aa55904bfa"
+  # Not enforced by the VPC CNI here: they would only suggest isolation.
+  networkPolicy:
+    create: false
+
+# No ClusterRoles extending admin/edit/view with Argo CD objects.
+createAggregateRoles: false
+
+crds:
+  install: true
+  keep: true
+
+configs:
+  cm:
+    admin.enabled: false
+    users.anonymous.enabled: false
+    exec.enabled: false
+    statusbadge.enabled: false
+  params:
+    # Applications in any namespace, limited to finrisk; the AppProjects decide which may use what.
+    application.namespaces: finrisk
+
+controller:
+  resources:
+    requests: {cpu: 100m, memory: 192Mi}
+    limits: {memory: 512Mi}
+
+# Renders kube-prometheus-stack (about 100 MB peak locally); the bootstrap records any OOM restart.
+repoServer:
+  resources:
+    requests: {cpu: 50m, memory: 96Mi}
+    limits: {memory: 512Mi}
+
+redis:
+  image:
+    repository: public.ecr.aws/docker/library/redis
+    tag: "8.6.4-alpine@sha256:2cc044fc5a07c9b701f8f1255a309ae9ad7856e694ac03513bf3648c01e40763"
+  resources:
+    requests: {cpu: 25m, memory: 32Mi}
+    limits: {memory: 128Mi}
+
+# The Redis password Secret (a hook Job): Redis requires authentication.
+redisSecretInit:
+  enabled: true
+  resources:
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {memory: 64Mi}
+
+server:
+  replicas: 0
+  # Otherwise its ClusterRole grants get/patch/delete on everything, Secrets included.
+  clusterRoleRules:
+    enabled: true
+    rules: []
+
+applicationSet:
+  replicas: 0
+
+dex:
+  enabled: false
+
+notifications:
+  enabled: false

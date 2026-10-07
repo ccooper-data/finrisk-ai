@@ -1,10 +1,9 @@
 version: 0.2
 
-# Namespace bootstrap. Runs as a role holding AmazonEKSClusterAdminPolicy (cluster scope),
-# because only cluster admin can create namespaces. This file is fixed by Terraform and reviewed
-# with the plan. The release role's IAM denies every StartBuild override that has a condition
-# key, including any environment override. Timeout and debug-session overrides have no key;
-# debug sessions cannot connect because this role has no ssmmessages permissions.
+# Cluster add-ons, as a role holding AmazonEKSClusterAdminPolicy. Fixed by Terraform and reviewed
+# with the plan; the release role's IAM denies every StartBuild override with a condition key (debug
+# sessions cannot connect: no ssmmessages). Idempotent; every wait and download bounded (summed in
+# infra/tests/test_cluster_addons.py); only the last evidence line contains "bootstrap=".
 
 env:
   shell: bash
@@ -14,34 +13,190 @@ phases:
     commands:
       - |
         set -euo pipefail
+        mkdir -p /opt/finrisk/bin /tmp/finrisk
+        A="${argocd_namespace}"
+        M="${monitoring_namespace}"
 
-        # Pinned kubectl (within one minor version of the cluster), verified against a
-        # checksum fixed in this file rather than one fetched from the same origin.
-        mkdir -p /opt/finrisk/bin
-        curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/${kubectl_version}/bin/linux/amd64/kubectl"
-        echo "${kubectl_sha256}  /tmp/kubectl" | sha256sum --check --strict
+        # Pinned kubectl, helm (CI's version) and Argo CD chart, checked against checksums fixed here.
+        # Transient errors are retried; a download takes at most about a minute.
+        fetch() {
+          curl -fsSL --retry 3 --retry-connrefused --retry-max-time 20 --max-time 40 -o "$1" "$2"
+          echo "$3  $1" | sha256sum --check --strict
+        }
+        fetch /tmp/kubectl "https://dl.k8s.io/release/${kubectl_version}/bin/linux/amd64/kubectl" "${kubectl_sha256}"
         install -m 0755 /tmp/kubectl /opt/finrisk/bin/kubectl
+        fetch /tmp/helm.tar.gz "https://get.helm.sh/helm-${helm_version}-linux-amd64.tar.gz" "${helm_sha256}"
+        tar -xzOf /tmp/helm.tar.gz linux-amd64/helm > /tmp/helm
+        install -m 0755 /tmp/helm /opt/finrisk/bin/helm
+        fetch /tmp/finrisk/argo-cd.tgz "https://github.com/argoproj/argo-helm/releases/download/argo-cd-${argocd_chart_version}/argo-cd-${argocd_chart_version}.tgz" "${argocd_chart_sha256}"
         K=/opt/finrisk/bin/kubectl
+        H=/opt/finrisk/bin/helm
         "$K" version --client
+        "$H" version
+
+        # The embedded infra/k8s files, each checked against its sha256 in plain text.
+        printf '%s' "${k8s_bundle_b64}" | base64 -d | gunzip | awk '/^#==> /{f="/tmp/finrisk/"$2; next} {print > f}'
+        sha256sum --check --strict <<EOF
+        ${cluster_guards_sha256}  /tmp/finrisk/cluster-guards.yaml
+        ${argocd_values_sha256}  /tmp/finrisk/argocd-values.yaml
+        ${argocd_projects_sha256}  /tmp/finrisk/argocd-projects.yaml
+        ${monitoring_app_sha256}  /tmp/finrisk/monitoring-app.yaml
+        EOF
 
         aws eks update-kubeconfig --name "${cluster_name}" --region "${region}"
 
-        # Access entries are eventually consistent; wait until this role is authorized.
-        for attempt in 1 2 3 4 5 6 7 8 9 10; do
-          if [ "$("$K" auth can-i create namespaces 2>/dev/null)" = "yes" ]; then break; fi
-          if [ "$attempt" = 10 ]; then echo "bootstrap role is not authorized on the cluster"; exit 1; fi
-          sleep 6
+        # Polls a check every 5 s until it passes or $1 seconds have passed. Checks call kubectl as kq,
+        # so a hung call holds a wait at most 10 s past its bound.
+        wait_for() {
+          local deadline=$(( $(date +%s) + $1 ))
+          shift
+          until "$@"; do
+            [ "$(date +%s)" -lt "$deadline" ] || return 1
+            sleep 5
+          done
+        }
+        kq() { "$K" --request-timeout=10s "$@"; }
+        get() { kq -n "$A" get "$@"; }
+        apply() { "$K" apply --server-side --field-manager=finrisk-bootstrap --force-conflicts -f "/tmp/finrisk/$1"; }
+
+        # Access entries are eventually consistent.
+        authorized() { [ "$(kq auth can-i create namespaces 2>/dev/null)" = "yes" ]; }
+        wait_for 60 authorized || { echo "bootstrap role is not authorized on the cluster"; exit 1; }
+
+        types="$("$K" get nodes -o jsonpath='{range .items[*]}{.metadata.labels.node\.kubernetes\.io/instance-type}{"\n"}{end}')"
+        if [ -z "$types" ] || grep -qvx "${node_instance_type}" <<<"$types"; then
+          echo "nodes are not all ${node_instance_type}: $types"
+          exit 1
+        fi
+        read -r pods cpu memory <<<"$("$K" get nodes -o jsonpath='{.items[0].status.allocatable.pods} {.items[0].status.allocatable.cpu} {.items[0].status.allocatable.memory}')"
+        echo "FINRISK_EVIDENCE node count=$(grep -c . <<<"$types") instance_type=${node_instance_type} allocatable_pods=$pods allocatable_cpu=$cpu allocatable_memory=$memory"
+
+        # Pod Security restricted before anything runs; warn set explicitly (it would default to
+        # enforce) because the deploy build's dry run fails on its warning.
+        for ns in "${namespace}" "$A" "$M"; do
+          "$K" create namespace "$ns" --dry-run=client -o yaml | "$K" apply -f -
+          "$K" label namespace "$ns" --overwrite \
+            pod-security.kubernetes.io/enforce=restricted \
+            pod-security.kubernetes.io/enforce-version=latest \
+            pod-security.kubernetes.io/warn=restricted \
+            pod-security.kubernetes.io/warn-version=latest
         done
 
-        # Idempotent: a retry is not an exceptional path.
-        "$K" create namespace "${namespace}" --dry-run=client -o yaml | "$K" apply -f -
-        # Pod Security Admission: the inference pod already meets the restricted profile. Warn is
-        # set explicitly (the API server would default it to enforce) because the deploy build's
-        # dry run fails on the warning this level returns for a violating Deployment.
-        "$K" label namespace "${namespace}" --overwrite \
-          pod-security.kubernetes.io/enforce=restricted \
-          pod-security.kubernetes.io/enforce-version=latest \
-          pod-security.kubernetes.io/warn=restricted \
-          pod-security.kubernetes.io/warn-version=latest
+        # Exposure guard, proven by server-side dry runs: a LoadBalancer Service, an Ingress and a PVC
+        # denied by this policy; externalIPs denied (by it, or first by DenyServiceExternalIPs if EKS
+        # enables that; recorded); a ClusterIP Service admitted.
+        apply cluster-guards.yaml
+        probe() {  # <kind> <spec>
+          local api=v1
+          if [ "$1" = Ingress ]; then api=networking.k8s.io/v1; fi
+          printf '{"apiVersion":"%s","kind":"%s","metadata":{"name":"finrisk-guard-probe"},"spec":%s}' "$api" "$1" "$2" \
+            | kq -n "${namespace}" create --dry-run=server -o name -f - 2>&1
+        }
+        lb='{"type":"LoadBalancer","ports":[{"port":80}]}'
+        ips='{"type":"ClusterIP","externalIPs":["192.0.2.10"],"ports":[{"port":80}]}'
+        clusterip='{"type":"ClusterIP","ports":[{"port":80}]}'
+        ingress='{"defaultBackend":{"service":{"name":"finrisk-guard-probe","port":{"number":80}}}}'
+        pvc='{"accessModes":["ReadWriteOnce"],"resources":{"requests":{"storage":"1Gi"}}}'
+        denied_by() {
+          local out
+          if out="$(probe "$@")"; then return 1; fi
+          if grep -qF "ValidatingAdmissionPolicy 'finrisk-no-external-exposure' with binding 'finrisk-no-external-exposure' denied request" <<<"$out"; then
+            echo policy
+          elif grep -qF "Use of external IPs is denied by admission control" <<<"$out"; then
+            echo DenyServiceExternalIPs
+          else
+            return 1
+          fi
+        }
+        guarded() {
+          [ "$(denied_by Service "$lb")" = policy ] && [ "$(denied_by Ingress "$ingress")" = policy ] \
+            && [ "$(denied_by PersistentVolumeClaim "$pvc")" = policy ] && external="$(denied_by Service "$ips")" \
+            && probe Service "$clusterip" >/dev/null
+        }
+        if ! wait_for 30 guarded; then
+          echo "exposure guard not proven; the dry runs answered:"
+          for spec in "$lb" "$ips" "$clusterip"; do probe Service "$spec" || true; done
+          probe Ingress "$ingress" || true
+          probe PersistentVolumeClaim "$pvc" || true
+          exit 1
+        fi
+        echo "FINRISK_EVIDENCE guard policy=finrisk-no-external-exposure loadbalancer_dry_run=denied external_ips_dry_run=denied external_ips_denied_by=$external ingress_dry_run=denied pvc_dry_run=denied clusterip_dry_run=admitted"
+
+        digest_pinned() {  # every container and init container image of every Pod in namespace $1
+          local images
+          images="$("$K" -n "$1" get pods -o jsonpath='{range .items[*]}{range .spec.initContainers[*]}{.image}{"\n"}{end}{range .spec.containers[*]}{.image}{"\n"}{end}{end}')"
+          if [ -z "$images" ] || grep -Evx '[^@[:space:]]+@sha256:[0-9a-f]{64}' <<<"$images"; then
+            echo "Pods in $1 run images not pinned by digest (above), or none"
+            return 1
+          fi
+        }
+
+        # A stopped install leaves the release pending, and Helm refuses every later one: DESTROY.
+        pending="$("$H" list --namespace "$A" --pending --short)"
+        [ -z "$pending" ] || { echo "Helm release $pending is pending from an interrupted bootstrap; DESTROY rather than retry"; exit 1; }
+        # Helm waits up to the timeout for the Redis password hook Job, then again for the workloads.
+        "$H" upgrade --install argocd /tmp/finrisk/argo-cd.tgz --namespace "$A" \
+          --values /tmp/finrisk/argocd-values.yaml --server-side=true --wait --timeout 150s --history-max 3
+        for workload in statefulset/argocd-application-controller deployment/argocd-repo-server deployment/argocd-redis; do
+          "$K" -n "$A" rollout status "$workload" --timeout=10s
+        done
+        digest_pinned "$A"
+        ingresses="$("$K" get ingresses --all-namespaces -o name)"
+        types="$("$K" get services --all-namespaces -o jsonpath='{range .items[*]}{.spec.type}{"\n"}{end}')"
+        ingresses="$(grep -c . <<<"$ingresses" || true)"
+        exposed="$(grep -cvx ClusterIP <<<"$types" || true)"
+        server="$(get deployment argocd-server -o jsonpath='{.spec.replicas}')"
+        admin="$(get configmap argocd-cm -o jsonpath='{.data.admin\.enabled}')"
+        app_ns="$(get configmap argocd-cmd-params-cm -o jsonpath='{.data.application\.namespaces}')"
+        redis="$(get deployment argocd-redis -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="REDIS_PASSWORD")].valueFrom.secretKeyRef.name}')"
+        get secret argocd-redis -o name
+        if [ "$ingresses$exposed$server" != 000 ] || [ "$admin" != false ] || [ "$app_ns" != "${namespace}" ] || [ "$redis" != argocd-redis ]; then
+          echo "Argo CD differs from the reviewed values: ingresses=$ingresses non_clusterip_services=$exposed server_replicas=$server admin_enabled=$admin application_namespaces=$app_ns redis_password_secret=$redis"
+          exit 1
+        fi
+        echo "FINRISK_EVIDENCE argocd chart=argo-cd-${argocd_chart_version} chart_sha256=${argocd_chart_sha256} image=$(get statefulset argocd-application-controller -o jsonpath='{.spec.template.spec.containers[0].image}') server_replicas=0 ingresses=0 non_clusterip_services=0 admin_enabled=false application_namespaces=${namespace} redis_auth=secret images_digest_pinned=yes"
+
+        # Gated on Healthy and a Succeeded sync, not Synced (CRD defaulting can show as OutOfSync).
+        "$K" wait --for=condition=Established --timeout=30s crd/applications.argoproj.io crd/appprojects.argoproj.io
+        apply argocd-projects.yaml
+        apply monitoring-app.yaml
+        app() { get applications.argoproj.io finrisk-monitoring -o jsonpath="$1"; }
+        monitoring_ready() {
+          [ "$(kq get crd servicemonitors.monitoring.coreos.com -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null)" = True ] || return 1
+          state="$(app '{.status.health.status}|{.status.operationState.phase}|{.status.sync.status}')" || return 1
+          IFS='|' read -r health phase sync <<<"$state"
+          [ "$health" = Healthy ] && [ "$phase" = Succeeded ]
+        }
+        if ! wait_for 420 monitoring_ready; then
+          echo "finrisk-monitoring is not Healthy with a Succeeded sync (health|operation|sync: $${state:-unknown})"
+          app '{.status.conditions}{"\n"}{.status.operationState.message}{"\n"}' || true
+          "$K" -n "$M" get pods,deployments,statefulsets || true
+          "$K" -n "$M" get events --sort-by=.lastTimestamp || true
+          get pods -o jsonpath='{range .items[*]}{.metadata.name} restarts={.status.containerStatuses[*].restartCount} last={.status.containerStatuses[*].lastState.terminated.reason}{"\n"}{end}' || true
+          exit 1
+        fi
+
+        # The generated Prometheus must not serve the lifecycle API (POST /-/quit, /-/reload).
+        digest_pinned "$M"
+        args="$("$K" -n "$M" get statefulset prometheus-monitoring -o jsonpath='{.spec.template.spec.containers[*].args}')"
+        if [ -z "$args" ] || grep -qF -- "--web.enable-lifecycle" <<<"$args"; then
+          echo "prometheus-monitoring has the lifecycle API enabled, or no args: $args"
+          exit 1
+        fi
+        # kube-state-metrics scraped (the deploy's PromQL needs it), via the API server proxy.
+        scraping() {
+          query="$(kq get --raw "/api/v1/namespaces/$M/services/monitoring-prometheus:9090/proxy/api/v1/query?query=up")" || return 1
+          read -r series up ksm <<<"$(python3 -c 'import json, sys
+        r = json.load(sys.stdin)["data"]["result"]
+        print(len(r), sum(s["value"][1] == "1" for s in r),
+              int(any(s["metric"].get("job") == "kube-state-metrics" and s["value"][1] == "1" for s in r)))' <<<"$query")" || return 1
+          [ "$ksm" = 1 ]
+        }
+        wait_for 90 scraping || { echo "Prometheus is not scraping kube-state-metrics: $${query:-no answer}"; exit 1; }
+        repo() { get pods -l app.kubernetes.io/name=argocd-repo-server -o jsonpath="{.items[*].status.containerStatuses[*].$1}"; }
+        restarts="$(repo restartCount)"
+        oom="$(repo lastState.terminated.reason)"
+        echo "FINRISK_EVIDENCE monitoring app=finrisk-monitoring health=$health operation=$phase sync=$sync oci_target=$(app '{.spec.source.targetRevision}') synced_revision=$(app '{.status.operationState.syncResult.revision}') images_digest_pinned=yes reload=ProcessSignal lifecycle_api=off prometheus_up_series=$series prometheus_up_ok=$up repo_server_restarts=$${restarts:-unknown} repo_server_last_termination=$${oom:-none}"
+        "$K" top pods --all-namespaces || echo "kubectl top unavailable (metrics-server not serving yet)"
 
         echo "FINRISK_EVIDENCE bootstrap=complete namespace=${namespace}"

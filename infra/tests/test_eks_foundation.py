@@ -35,9 +35,14 @@ checks = {
     "manifest has a Pod template": bool(templates),
     **{name: all(r[name] for r in results) for name in (results[0] if results else {})},
     # The deploy build's dry run fails on the warning the warn level returns for a violating Deployment.
-    "namespace enforces and warns Pod Security restricted, latest version": 'label namespace "${namespace}" --overwrite'
-        in bootstrap and psa_labels == {"enforce": ["restricted"], "enforce-version": ["latest"],
-                                        "warn": ["restricted"], "warn-version": ["latest"]},
+    # One loop labels the app namespace and the add-on namespaces (Argo CD, monitoring) alike.
+    "namespaces enforce and warn Pod Security restricted, latest version":
+        'for ns in "${namespace}" "$A" "$M"; do' in bootstrap
+        and 'label namespace "$ns" --overwrite' in bootstrap
+        and psa_labels == {"enforce": ["restricted"], "enforce-version": ["latest"],
+                           "warn": ["restricted"], "warn-version": ["latest"]},
+    "worker type sized for the add-ons, validated to the budgeted types":
+        'default     = ["t3.large"]' in variables and 'contains(["t3.large", "m7i-flex.large"], t)' in variables,
 }
 
 failed = [name for name, ok in checks.items() if not ok]

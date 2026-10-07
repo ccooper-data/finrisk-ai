@@ -1,0 +1,39 @@
+# Exposure and orphan guard, applied by the bootstrap build before anything runs in the namespaces.
+# Every AWS resource must stay in Terraform state so DESTROY removes it: a LoadBalancer Service
+# creates a load balancer whose ENIs block VPC deletion, an Ingress can through a controller, and a
+# PVC can create an EBS volume. externalIPs let a Service intercept traffic (CVE-2020-8554). The
+# bootstrap proves it live; infra/tests/test_cluster_guards.py evaluates the expressions.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: finrisk-no-external-exposure
+spec:
+  # A request the policy cannot evaluate is refused.
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["services"]
+      - apiGroups: ["networking.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["ingresses"]
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["persistentvolumeclaims"]
+  validations:
+    - expression: "request.resource.resource == 'services'"
+      message: "Ingress and PersistentVolumeClaim objects are not allowed on this cluster: they can create AWS resources outside Terraform state."
+    - expression: "request.resource.resource != 'services' || (object.spec.type == 'ClusterIP' && (!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0))"
+      message: "Only ClusterIP Services without externalIPs are allowed on this cluster."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: finrisk-no-external-exposure
+spec:
+  policyName: finrisk-no-external-exposure
+  validationActions: ["Deny"]

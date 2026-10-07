@@ -91,12 +91,20 @@ jobs:
         run: python infra/tests/test_eks_deploy_path.py
       - name: Deploy buildspec runtime acceptance
         run: python infra/tests/test_deploy_buildspec_runtime.py
+      - name: Bootstrap buildspec runtime acceptance
+        run: python infra/tests/test_bootstrap_buildspec_runtime.py
+      - name: Cluster guard acceptance
+        run: python infra/tests/test_cluster_guards.py
+      - name: Cluster add-ons static acceptance
+        run: python infra/tests/test_cluster_addons.py
       - name: Inference image acceptance
         run: python infra/tests/test_inference_image.py
       - name: Inference chart static acceptance
         run: python infra/tests/test_inference_chart.py
-      # Pinned, checksum-verified helm and kubeconform for the chart acceptance, which fails without them.
-      - name: Install pinned helm and kubeconform
+      # Pinned, checksum-verified helm, kubeconform, platform charts and the monitoring chart's OCI
+      # manifest for the check_*.py acceptance scripts, which fail without them
+      # (test_cluster_addons.py pins that each runs here).
+      - name: Install pinned helm, kubeconform and charts
         env:
           K8S_TOOLS: ${{ runner.temp }}/k8s-tools
         run: bash .github/scripts/install-k8s-tools.sh "$K8S_TOOLS"
@@ -104,6 +112,22 @@ jobs:
         env:
           K8S_TOOLS: ${{ runner.temp }}/k8s-tools
         run: python infra/tests/check_inference_chart.py
+      - name: Cluster guard schema acceptance (kubeconform, policy and dry-run probes)
+        env:
+          K8S_TOOLS: ${{ runner.temp }}/k8s-tools
+        run: python infra/tests/check_cluster_guards.py
+      - name: Argo CD install acceptance (render, Pod Security, exposure, RBAC, kubeconform)
+        env:
+          K8S_TOOLS: ${{ runner.temp }}/k8s-tools
+        run: python infra/tests/check_argocd_install.py
+      - name: Monitoring stack acceptance (OCI digest, render, AppProject fit, Prometheus hardening)
+        env:
+          K8S_TOOLS: ${{ runner.temp }}/k8s-tools
+        run: python infra/tests/check_monitoring_stack.py
+      - name: Worker capacity budget acceptance
+        env:
+          K8S_TOOLS: ${{ runner.temp }}/k8s-tools
+        run: python infra/tests/check_capacity_budget.py
       - name: Cloud security acceptance
         run: python infra/tests/test_security_foundation.py
       - name: Observability and SLO acceptance

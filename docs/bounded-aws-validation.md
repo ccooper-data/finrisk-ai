@@ -22,8 +22,13 @@ GitHub-hosted runners cannot reach the private EKS endpoint, so two CodeBuild pr
 |---|---|---|
 | `github-finrisk-deployer` (environment `portfolio-validation`) | Terraform lifecycle, including the CodeBuild projects and their roles | Start builds; associate any EKS access policy other than the two below; assume any `finrisk-ai-*` role; create a cluster that grants its creator admin |
 | `github-finrisk-releaser` (environment `portfolio-release`) | Push images to `finrisk-ai-inference`; start, watch and stop the two builds; read their logs | Change either project; override anything with an IAM condition key except `FINRISK_IMAGE_URI` on the deploy build (timeout and debug-session overrides have no key; debug sessions cannot connect) |
-| `finrisk-ai-codebuild-bootstrap-*` | `AmazonEKSClusterAdminPolicy` (cluster scope); creates the `finrisk` namespace | Accept any caller-supplied variable |
+| `finrisk-ai-codebuild-bootstrap-*` | `AmazonEKSClusterAdminPolicy` (cluster scope); creates the namespaces, the exposure guard, headless Argo CD and the lean Prometheus stack (from PR 2a) | Accept any caller-supplied variable |
 | `finrisk-ai-codebuild-deploy-*` | `AmazonEKSEditPolicy` scoped to `finrisk`: apply, roll out, exec smoke test, roll back | Create namespaces or touch other namespaces |
+
+From PR 2a, the cluster also runs Argo CD and a lean Prometheus stack. Their rights are stated here, not claimed as least privilege:
+- The Argo CD application controller's ClusterRole is equivalent to cluster admin. Each AppProject (`infra/k8s/argocd-projects.yaml`) bounds what its Applications may deploy, but that is an Argo CD-level guard, not Kubernetes RBAC.
+- The prometheus-operator's ClusterRole reads and writes Secrets and ConfigMaps cluster-wide, and manages StatefulSets, Services and Endpoints. kube-state-metrics reads no Secrets or ConfigMaps. The argocd-server ClusterRole is emptied, because the server never runs.
+- The in-cluster network is flat: the VPC CNI enforces no NetworkPolicy here. Any Pod can reach the Argo CD repo-server (gRPC without client authentication), Redis (password required) and the Prometheus HTTP API. The Prometheus lifecycle endpoints are off.
 
 The served model is pinned in `model/served-model.json` (source run, size, SHA-256). Changing it takes a reviewed commit, and the image build also checks that the training run's recorded Python, scikit-learn, numpy and pandas versions match `constraints/serving.txt`.
 

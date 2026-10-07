@@ -15,7 +15,7 @@ checks = {
     "no image input to redirect the deploy": "inputs:" not in workflow,
     "digest resolution": "imageDigest" in workflow,
     "digest deployment": "@$digest" in workflow and 'FINRISK_IMAGE_URI=${{ steps.image.outputs.uri }}' in workflow,
-    "namespace bootstrapped before deploy": workflow.index("Bootstrap namespace") < workflow.index("Deploy digest-pinned image"),
+    "cluster add-ons bootstrapped before deploy": workflow.index("Bootstrap cluster add-ons") < workflow.index("Deploy digest-pinned image"),
     "build failure fails the job": 'if [ "$status" != "SUCCEEDED" ]' in runner,
     "previous revision captured before apply": "PREV_REV=" in buildspec
         and buildspec.index("PREV_REV=") < buildspec.index("deploy_and_verify() {"),

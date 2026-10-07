@@ -185,8 +185,52 @@ jobs:
             exit 1
           }
 
+      # Nothing outside Terraform state may outlive the window. In-cluster objects are ClusterIP-only
+      # with emptyDir storage, and the bootstrap's server-side dry runs proved live that the exposure
+      # guard denies LoadBalancer and externalIPs Services, Ingresses and PVCs. Read-only (the existing
+      # ec2:Describe*), and every query filtered to this project or cluster, so no unrelated resource
+      # ID is published:
+      # - the tagged VPC. A network interface left in its subnets (a load balancer's, or a VPC CNI
+      #   one) blocks deleting them, so with no VPC left none remains; if the VPC remains, the
+      #   interfaces still in it are listed. The deployer cannot list load balancers directly.
+      # - available EBS volumes tagged for this cluster.
+      - name: Verify no orphaned AWS resources
+        if: inputs.action == 'destroy'
+        env:
+          CLUSTER: finrisk-ai-portfolio
+        run: |
+          set -euo pipefail
+          vpcs="$(aws ec2 describe-vpcs --filters Name=tag:Project,Values=FinRisk-AI Name=tag:Environment,Values=portfolio --query 'Vpcs[].VpcId' --output text)"
+          enis=""
+          if [ -n "$vpcs" ]; then
+            enis="$(aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$(tr -s '[:space:]' ',' <<<"$vpcs" | sed 's/,$//')" --query 'NetworkInterfaces[].NetworkInterfaceId' --output text)"
+          fi
+          owned="$(aws ec2 describe-volumes --filters Name=status,Values=available "Name=tag-key,Values=kubernetes.io/cluster/$CLUSTER" --query 'Volumes[].VolumeId' --output text)"
+          nodes="$(aws ec2 describe-volumes --filters Name=status,Values=available "Name=tag:eks:cluster-name,Values=$CLUSTER" --query 'Volumes[].VolumeId' --output text)"
+          volumes="$(printf '%s %s' "$owned" "$nodes" | tr -s '[:space:]' '\n' | sort -u | grep . | paste -sd, - || true)"
+          count() { wc -w <<<"$1" | tr -d '[:space:]'; }
+          {
+            echo "vpc_tagged_remaining=$(count "$vpcs")"
+            echo "vpc_enis_remaining=$(count "$enis")"
+            echo "available_ebs_volumes=${volumes:-none}"
+            echo "load_balancers=not listed (no elasticloadbalancing:Describe*); none possible with vpc_tagged_remaining=0 and the bootstrap's live LoadBalancer denial"
+          } | tee teardown-evidence.txt >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$vpcs$enis$volumes" ]; then
+            echo "::error::AWS resources outside Terraform state remain after DESTROY (see teardown-evidence.txt); remove them by hand"
+            exit 1
+          fi
+
       # Runs only after state is verified empty, so the reaper's fail-safe still covers a
       # partial destroy.
       - name: Clear teardown lease after verified destroy
         if: inputs.action == 'destroy'
         run: aws s3 rm "s3://${{ vars.TF_STATE_BUCKET }}/leases/bounded-validation-deadline.txt"
+
+      - name: Upload teardown evidence
+        if: always() && inputs.action == 'destroy'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bounded-aws-teardown-evidence
+          path: teardown-evidence.txt
+          if-no-files-found: ignore
+          retention-days: 7
