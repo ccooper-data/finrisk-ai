@@ -47,7 +47,7 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_RELEASE_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          # Both builds can take up to 65 minutes; requires the role's MaxSessionDuration >= 7200.
+          # Both builds can take up to 80 minutes; requires the role's MaxSessionDuration >= 7200.
           role-duration-seconds: 7200
 
       - name: Resolve immutable ECR image digest
@@ -66,10 +66,11 @@ jobs:
             echo "image_uri=${account}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@$digest"
           } > "$EVIDENCE_FILE"
 
-      # Fixed build with cluster scope; IAM denies every override for it.
-      - name: Bootstrap namespace
+      # Fixed build with cluster scope; IAM denies every override for it. Namespaces, the exposure
+      # guard, Argo CD and the lean Prometheus stack (infra/terraform/deploy/bootstrap-buildspec.yml.tftpl).
+      - name: Bootstrap cluster add-ons
         env:
-          CODEBUILD_WAIT_MINUTES: "30"
+          CODEBUILD_WAIT_MINUTES: "35"
           EVIDENCE_TERMINAL: "bootstrap=complete"
         run: exec .github/scripts/run-codebuild.sh "$BOOTSTRAP_PROJECT"
 

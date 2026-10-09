@@ -19,7 +19,7 @@ workflow = yaml.safe_load((ROOT / ".github/workflows/terraform-validate.yml").re
 job = workflow["jobs"]["validate"]
 runs = [s.get("run", "") for s in job["steps"]]
 pinned = dict(re.findall(r'^(\w+)="([^"]+)"$', install, re.M))
-fetched = re.findall(r'^fetch \S+ "(https://[^"]+)" "\$(\w+_SHA256)"$', install, re.M)
+fetched = re.findall(r'^fetch \S+ "(https://[^"]+)" "\$(\w+_SHA256)"(?: -H "[^"]+")*$', install, re.M)
 
 
 def step(command):
@@ -50,9 +50,13 @@ checks = {
         and templates["servicemonitor.yaml"].endswith("{{- end }}\n"),
     "install script pins exact versions": all(re.fullmatch(r"v\d+\.\d+\.\d+", pinned.get(k, "")) for k in
                                               ("HELM_VERSION", "KUBECONFORM_VERSION", "PROMETHEUS_OPERATOR_VERSION")),
+    # helm, kubeconform, the ServiceMonitor CRD, its converter, the argo-cd and kube-prometheus-stack
+    # charts, and the OCI manifest Argo CD syncs (check_argocd_install.py, check_monitoring_stack.py).
+    # The one other curl fetches the anonymous GHCR token that manifest request carries.
     "install script verifies every download against a fixed sha256": "set -euo pipefail" in install
-        and len(fetched) == 4 and install.count("curl ") == 1
-        and 'curl -fsSLo "$1" "$2"\n  echo "$3  $1" | sha256sum --check --strict\n' in install
+        and len(fetched) == 7 and len(re.findall(r"^fetch ", install, re.M)) == 7 and install.count("curl ") == 2
+        and 'curl -fsSL "${@:4}" -o "$1" "$2"\n  echo "$3  $1" | sha256sum --check --strict\n' in install
+        and re.search(r'^token="\$\(curl -fsSL "https://ghcr\.io/token\?scope=repository:\$ghcr:pull" \| ', install, re.M) is not None
         and all(re.fullmatch(r"[0-9a-f]{64}", pinned.get(var, "")) for _, var in fetched),
     "CI installs linux-amd64 builds": "helm-${HELM_VERSION}-linux-amd64.tar.gz" in install
         and "kubeconform-linux-amd64.tar.gz" in install,

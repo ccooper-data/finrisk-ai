@@ -16,7 +16,7 @@ This runbook governs the bounded FinRisk-AI EKS validation deployment. It covers
 1. Derive the image tag `sha-<commit>` from the workflow's own commit and validate its format.
 2. Exchange GitHub OIDC identity for short-lived release-role credentials.
 3. Resolve the tag to an immutable ECR digest; fail if this commit has no image.
-4. Run the bootstrap CodeBuild project (cluster admin, no caller input): create the `finrisk` namespace and enforce (and warn on) Pod Security `restricted`.
+4. Run the bootstrap CodeBuild project (cluster admin, no caller input). It creates the `finrisk`, `argocd` and `monitoring` namespaces and enforces (and warns on) Pod Security `restricted` in each. It then applies the exposure guard and proves it with server-side dry runs, installs headless Argo CD from the pinned chart, and waits for Argo CD to sync the lean Prometheus stack (see `docs/live-aws-validation-plan.md`). Any failed check stops it before `bootstrap=complete`, and the deploy does not start.
 5. Run the deploy CodeBuild project (edit rights in `finrisk` only) with the digest-pinned `FINRISK_IMAGE_URI` as its only input. Inside the VPC it:
    1. re-validates the URI against this account's repository and digest form;
    2. records the current Deployment revision as the rollback target (none only when the Deployment does not exist);
@@ -32,6 +32,8 @@ A failure before the apply (for example a rejected URI, an unreachable namespace
 3. The evidence artifact is uploaded on every outcome; preserve it and the CodeBuild log for root-cause analysis.
 4. Do not retry deployment until the failure is understood.
 
+A failed bootstrap build stops the workflow before the deploy build runs, so nothing in `finrisk` changes. A bootstrap stopped while Helm was installing Argo CD (a cancelled or timed-out run) leaves the Helm release pending, and Helm then refuses every later install: the next bootstrap stops with `Helm release argocd is pending from an interrupted bootstrap`. Do not retry. Preserve the evidence and DESTROY; nothing rolls the release back.
+
 If the result is `rollback_failed`, or the run was cancelled or timed out (the workflow then stops the unfinished build and waits for it to stop, which can interrupt an apply or a rollback; if it reports the build may still be running, wait for it before DESTROY), treat the environment as an incident and do not claim automated recovery succeeded. The EKS API is private and only the two CodeBuild roles have cluster access entries, so there is no operator kubectl path: preserve the evidence and DESTROY.
 
 ## Scaling validation
@@ -41,7 +43,7 @@ The Phase-4 HPA contract is 1–3 inference replicas with a 70% CPU target. Live
 After evidence collection:
 1. Save the window's workflow artifacts and export the CodeBuild logs (CloudWatch log group `/finrisk/codebuild/finrisk-ai-portfolio`). There is no runtime telemetry to export yet.
 2. Disable or destroy EKS, NAT, CloudWatch, and CloudTrail validation resources.
-3. Confirm Terraform plan no longer proposes retained billable runtime resources that were intended to be ephemeral.
+3. Confirm Terraform plan no longer proposes retained billable runtime resources that were intended to be ephemeral. The DESTROY run's **Verify no orphaned AWS resources** step must pass, and its `teardown-evidence.txt` must show no tagged VPC (so no network interface left in its subnets) and no available volume of this cluster. If it fails, the teardown lease is kept; remove what it lists by hand.
 4. Record teardown time and cost snapshot.
 
 A successful deployment is not the final acceptance condition; successful teardown is part of the portfolio evidence.

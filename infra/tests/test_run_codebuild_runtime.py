@@ -145,7 +145,7 @@ checks["an unexpected status is never recorded and stops the build at the deadli
 code, out, calls, evidence = cancel("cancel-runner", DEPLOY_ARGS)
 checks["SIGINT stops the build at once, not after the poll sleep"] = code == 130 and len(stops(calls)) == 1
 
-for step in ("Bootstrap namespace", "Deploy digest-pinned image"):
+for step in ("Bootstrap cluster add-ons", "Deploy digest-pinned image"):
     command, env = step_script(step)
     code, out, calls, evidence = cancel(step, command, env)
     checks[f"cancelling '{step}' reaches the runner's stop-build trap"] = code == 130 and len(stops(calls)) == 1

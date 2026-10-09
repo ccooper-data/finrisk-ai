@@ -71,9 +71,14 @@ variable "eks_cluster_version" {
 }
 
 variable "eks_node_instance_types" {
-  description = "Small worker types for bounded portfolio validation."
+  description = "Worker type for bounded portfolio validation: one t3.large holds kube-system, Argo CD, Prometheus and the inference pods at HPA max (infra/tests/check_capacity_budget.py). m7i-flex.large, the same size, is the only budgeted alternative."
   type        = list(string)
-  default     = ["t3.small"]
+  default     = ["t3.large"]
+
+  validation {
+    condition     = length(var.eks_node_instance_types) == 1 && alltrue([for t in var.eks_node_instance_types : contains(["t3.large", "m7i-flex.large"], t)])
+    error_message = "Exactly one worker type, t3.large or m7i-flex.large: the capacity budget is checked for those two only."
+  }
 }
 
 variable "eks_node_desired_size" {

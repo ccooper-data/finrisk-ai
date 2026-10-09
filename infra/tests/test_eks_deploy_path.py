@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 # In-VPC CodeBuild deploy path to the private EKS API: Terraform, buildspecs, IAM, workflows.
+import base64
+import gzip
 import json
 import re
 import subprocess
 from fnmatch import fnmatchcase
 from pathlib import Path
+
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 TF = ROOT / "infra/terraform"
@@ -22,6 +26,8 @@ deploy_wf = (ROOT / ".github/workflows/deploy-inference.yml").read_text()
 build_wf = (ROOT / ".github/workflows/build-inference-image.yml").read_text()
 provision_wf = (ROOT / ".github/workflows/provision-bounded-aws.yml").read_text()
 runner = (ROOT / ".github/scripts/run-codebuild.sh").read_text()
+install = (ROOT / ".github/scripts/install-k8s-tools.sh").read_text()
+terraform = {p.name: p.read_text() for p in sorted(TF.glob("*.tf"))}
 REF = {s: json.loads((ROOT / f"infra/tests/fixtures/aws-service-reference/{s}.json").read_text())["actions"]
        for s in ("codebuild", "eks", "iam", "sts")}
 
@@ -70,10 +76,133 @@ def unknown_condition_keys(policy):
     return bad
 
 
+def kubectl_checked(deploy, bootstrap):
+    """Both buildspecs install kubectl only after checking it against the pinned sha256: the deploy
+    inline, the bootstrap through fetch (defined first, and checking every download)."""
+    fetch = ('        fetch() {\n          curl -fsSL --retry 3 --retry-connrefused --retry-max-time 20 --max-time 40 -o "$1" "$2"\n'
+             '          echo "$3  $1" | sha256sum --check --strict\n        }\n')
+    fetched = ('        fetch /tmp/kubectl "https://dl.k8s.io/release/${kubectl_version}/bin/linux/amd64/kubectl" "${kubectl_sha256}"\n'
+               '        install -m 0755 /tmp/kubectl ')
+    return '        echo "${kubectl_sha256}  /tmp/kubectl" | sha256sum --check --strict\n        install -m 0755 /tmp/kubectl ' in deploy \
+        and fetch in bootstrap and fetched in bootstrap and bootstrap.index(fetch) < bootstrap.index(fetched)
+
+
 def render(tpl, **values):
     for k, v in values.items():
         tpl = tpl.replace("${" + k + "}", v)
     return tpl.replace("$${", "${")
+
+
+# --- Buildspec inputs: known at PLAN, so the reviewed plan text shows each buildspec in full ---
+# An allowlist. A value that reaches either CodeBuild templatefile, directly, through locals or through
+# a nested templatefile, may use only variables, path, literals, the pure functions below, and the
+# listed attributes (each checked below to be known at PLAN). Anything else (a managed resource's
+# attribute in any form, a data source, a module, count or each, or an impure function such as
+# timestamp) is refused: it could make the buildspec "(known after apply)" in the plan, and the
+# cluster-admin buildspec would no longer be reviewed.
+FUNCTIONS = {"templatefile", "file", "filesha256", "base64gzip", "base64encode", "jsonencode", "jsondecode",
+             "join", "format", "lower", "upper", "replace"}
+KNOWN_AT_PLAN = {"aws_ecr_repository.inference.name", "data.aws_caller_identity.current.account_id"}
+REFERENCE = re.compile(r"(?<![\w.\]])([A-Za-z_][\w-]*)((?:\s*\.\s*(?:[A-Za-z_][\w-]*|\*)|\s*\[[^\]]*\])+)")
+
+
+def scan(text, i=0, close=None):
+    """An HCL expression from i to the bracket `close` that matches (or the end): its code, with string
+    text blanked but ${...} interpolations kept and comments dropped, and the index after `close`.
+    Heredocs and %{ } directives raise ValueError rather than being guessed at."""
+    code, depth = [], 0
+    while i < len(text):
+        c = text[i]
+        if c == '"':
+            i += 1
+            while text[i] != '"':
+                if text[i] == "\\":
+                    i += 2
+                elif text.startswith(("$${", "%%{"), i):
+                    i += 3
+                elif text.startswith("%{", i):
+                    raise ValueError("template directive")
+                elif text.startswith("${", i):
+                    inner, i = scan(text, i + 2, "}")
+                    code.append(f" {inner} ")
+                else:
+                    i += 1
+            code.append(' "" ')
+            i += 1
+            continue
+        if c == "#" or text.startswith("//", i):
+            i = text.find("\n", i) % (len(text) + 1)
+            continue
+        if text.startswith(("<<", "/*"), i):
+            raise ValueError("heredoc or block comment")
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0:
+                if c != close:
+                    raise ValueError("unbalanced " + c)
+                return "".join(code), i + 1
+            depth -= 1
+        code.append(c)
+        i += 1
+    if close:
+        raise ValueError("unterminated")
+    return "".join(code), i
+
+
+def local_definitions(sources):
+    """Each local's full expression (multi-line ones included), from every locals block."""
+    defs = {}
+    for text in sources.values():
+        for start in [m.start() for m in re.finditer(r"^locals \{", text, re.M)]:
+            body = block(text[start:], "locals {")
+            for m in re.finditer(r"^  (\w+)\s*=(.*?)(?=^  \w+\s*=|\Z)", body[body.index("{") + 1:-1], re.M | re.S):
+                defs[m[1]] = m[2]
+    return defs
+
+
+def buildspec_inputs(cfg):
+    """The code of everything passed to one CodeBuild project's buildspec templatefile."""
+    start = cfg.index("buildspec = templatefile(") + len("buildspec = templatefile(")
+    return scan(cfg, start, ")")[0]
+
+
+def unknown_at_plan(code, defs, seen=()):
+    """Everything in an expression's code that may be unknown until APPLY: what the allowlist lacks."""
+    bad = [f"{f}()" for f in re.findall(r"(?<![\w.])([A-Za-z_]\w*)\s*\(", code) if f not in FUNCTIONS]
+    loop_vars = {v for pair in re.findall(r"\bfor\s+(\w+)(?:\s*,\s*(\w+))?\s+in\b", code) for v in pair if v}
+    for root, trailer in REFERENCE.findall(code):
+        path = root + re.sub(r"\s+", "", trailer)
+        if root in ("var", "path") or root in loop_vars:
+            continue
+        if root == "local":
+            name = re.match(r"\s*\.\s*(\w+)", trailer)[1]
+            if name not in defs:
+                bad.append(path)
+            elif name not in seen:
+                bad += [f"{path}: {b}" for b in unknown_at_plan(scan(defs[name])[0], defs, (*seen, name))]
+        elif re.sub(r"\[[^\]]*\]", "", path) not in KNOWN_AT_PLAN:
+            bad.append(path)
+    return bad
+
+
+def known_attributes_are_known():
+    """The allowlisted attributes: the repository's name is a configured argument made of known
+    values, and the caller identity is a data source without arguments, read during PLAN."""
+    name = re.search(r'^  name\s+= (.+)$', block(terraform["ecr.tf"], 'resource "aws_ecr_repository" "inference"'), re.M)
+    return bool(name) and not unknown_at_plan(scan(name[1])[0], LOCALS) \
+        and 'data "aws_caller_identity" "current" {}' in terraform["security.tf"] \
+        and len(re.findall(r'data "aws_caller_identity"', "".join(terraform.values()))) == 1
+
+
+def rendered_size(template, values, embedded):
+    """Approximate rendered length: the template, plus each embedded payload as base64 of its gzip
+    (base64 of the bytes themselves where not compressed), plus the plain values. Gzip level 1
+    compresses less than Terraform's base64gzip, so this errs high."""
+    size = len(template)
+    for name, (data, compressed) in embedded.items():
+        size += len(base64.b64encode(gzip.compress(data, 1) if compressed else data)) - len("${" + name + "}")
+    return size + sum(len(v) for v in values.values())
 
 
 # --- IAM evaluation helpers for the boundary (allow + principal match, no deny) ------------
@@ -136,6 +265,43 @@ bootstrap_cfg = block(path_tf, 'resource "aws_codebuild_project" "k8s_bootstrap"
 edit_assoc = block(path_tf, 'resource "aws_eks_access_policy_association" "k8s_deploy_edit"')
 admin_assoc = block(path_tf, 'resource "aws_eks_access_policy_association" "k8s_bootstrap_cluster_admin"')
 cluster = block(eks, 'resource "aws_eks_cluster" "platform"')
+LOCALS = local_definitions(terraform)
+bootstrap_inputs, deploy_inputs = buildspec_inputs(bootstrap_cfg), buildspec_inputs(deploy_cfg)
+# Negative controls: a value unknown at PLAN, added to the bootstrap's templatefile map, is caught in
+# every form; through a local too.
+UNKNOWN_INPUTS = {
+    "the cluster endpoint": "cluster_endpoint = aws_eks_cluster.platform[0].endpoint",
+    "a nested attribute (the cluster CA)": "cluster_ca = aws_eks_cluster.platform[0].certificate_authority[0].data",
+    "a splat (the subnet IDs)": "subnets = jsonencode(aws_subnet.private[*].id)",
+    "an unlisted attribute of the allowlisted resource": "registry = aws_ecr_repository.inference.registry_id",
+    "the OIDC issuer": "issuer = aws_eks_cluster.platform[0].identity[0].oidc[0].issuer",
+    "the NAT gateway's public IP": "nat_ip = aws_nat_gateway.platform.public_ip",
+    "a data source not on the list": "vpc = data.aws_vpc.default.id",
+    "an impure function": "built_at = timestamp()",
+    "a nested templatefile": 'inference_app_b64 = base64gzip(templatefile("${path.module}/../k8s/x.yaml.tftpl", {\n'
+                             "        image_repository = aws_ecr_repository.inference.repository_url\n      }))",
+}
+unknown_controls = {name: unknown_at_plan(buildspec_inputs(bootstrap_cfg.replace(
+    "      cluster_name ", f"      {line}\n      cluster_name ", 1)), LOCALS) for name, line in UNKNOWN_INPUTS.items()}
+indirect = dict(LOCALS, k8s_cluster_name=" aws_iam_role.codebuild_bootstrap[0].arn\n")
+install_pins = dict(re.findall(r'^(\w+)="([^"]+)"$', install, re.M))
+tf_pins = dict(re.findall(r'^  (\w+)\s+= "([^"]*)"$', path_tf, re.M))
+deploy_jobs = yaml.safe_load(deploy_wf)["jobs"]["deploy"]
+wait = {s["name"]: int(s.get("env", {}).get("CODEBUILD_WAIT_MINUTES", 0)) for s in deploy_jobs["steps"] if "name" in s}
+timeouts = {name: (int(re.search(r"build_timeout\s+= (\d+)", cfg)[1]), int(re.search(r"queued_timeout\s+= (\d+)", cfg)[1]))
+            for name, cfg in (("bootstrap", bootstrap_cfg), ("deploy", deploy_cfg))}
+session = int(re.search(r"role-duration-seconds: (\d+)", deploy_wf)[1]) // 60
+manifests = ROOT / "infra/k8s"
+# The bootstrap's bundle as deploy_path.tf builds it: a "#==> <file>" line before each file.
+bundle = "".join(f"#==> {f}\n" + (manifests / f).read_text()
+                 for f in re.findall(r'"([^"]+)"', re.search(r"k8s_bootstrap_files\s+= \[(.*)\]", path_tf)[1])).encode()
+sizes = {
+    "bootstrap": rendered_size(bootstrap_spec, {"cluster_name": "finrisk-ai-portfolio"}, {"k8s_bundle_b64": (bundle, True)}),
+    "deploy": rendered_size(deploy_spec, {"cluster_name": "finrisk-ai-portfolio"},
+                            {"manifest_b64": ((manifests / "inference.yaml").read_bytes(), False)}),
+}
+evidence_lines = {name: re.findall(r'(?:echo "|print\(")FINRISK_EVIDENCE ([^"]*)"', spec) for name, spec in
+                  (("bootstrap", bootstrap_spec), ("deploy", deploy_spec))}
 
 checks = {
     # Cluster authorization and network
@@ -154,19 +320,58 @@ checks = {
         and path_tf.count('variable = "aws:SourceArn"') == 2,
     "deploy runner: Edit scoped to finrisk only": f'policy_arn    = "${{local.eks_access_policy}}/AmazonEKSEditPolicy"' in edit_assoc
         and 'type       = "namespace"' in edit_assoc and "namespaces = [local.k8s_app_namespace]" in edit_assoc
-        and 'k8s_app_namespace     = "finrisk"' in path_tf,
+        and re.search(r'^  k8s_app_namespace\s+= "finrisk"$', path_tf, re.M) is not None,
     "bootstrap runner: cluster admin at cluster scope": "AmazonEKSClusterAdminPolicy" in admin_assoc and 'type = "cluster"' in admin_assoc,
     "metrics-server add-on after nodes": 'addon_name   = "metrics-server"' in path_tf and "depends_on = [aws_eks_node_group.platform]" in path_tf,
-    "kubectl pinned with fixed checksum": re.search(r'kubectl_version = "v1\.35\.\d+"', path_tf) is not None
+    "kubectl pinned with fixed checksum, checked before it is installed": re.search(r'kubectl_version = "v1\.35\.\d+"', path_tf) is not None
         and re.search(r'kubectl_sha256  = "[0-9a-f]{64}"', path_tf) is not None
-        and "sha256sum --check --strict" in deploy_spec and "sha256sum --check --strict" in bootstrap_spec,
+        and kubectl_checked(deploy_spec, bootstrap_spec),
+    "negative control: the bootstrap's kubectl without its checksum is caught": not kubectl_checked(deploy_spec, bootstrap_spec.replace(
+        'fetch /tmp/kubectl "https://dl.k8s.io/release/${kubectl_version}/bin/linux/amd64/kubectl" "${kubectl_sha256}"',
+        'curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/${kubectl_version}/bin/linux/amd64/kubectl"')),
+    "negative control: a bootstrap fetch that skips the checksum is caught": not kubectl_checked(
+        deploy_spec, bootstrap_spec.replace('          echo "$3  $1" | sha256sum --check --strict\n', "")),
+    "negative control: the deploy's kubectl without its checksum is caught": not kubectl_checked(
+        deploy_spec.replace('        echo "${kubectl_sha256}  /tmp/kubectl" | sha256sum --check --strict\n', ""), bootstrap_spec),
     # Buildspecs and manifest
     "deploy validates FINRISK_IMAGE_URI before use": deploy_spec.index("FINRISK_IMAGE_URI rejected") < deploy_spec.index("curl -fsSLo"),
     "URI check accepts only the digest-pinned repo URI": all(uri_results[v] == ok for v, ok in URI_CASES.items()),
     "deploy manifest has no Namespace (Edit cannot create it)": "kind: Namespace" not in manifest,
     "HPA owns replicas": re.search(r"^\s*replicas:", manifest, re.M) is None,
-    "bootstrap creates namespace idempotently": "create namespace" in bootstrap_spec and "--dry-run=client -o yaml" in bootstrap_spec,
+    "bootstrap creates its three namespaces idempotently, labelled before helm runs":
+        'for ns in "${namespace}" "$A" "$M"; do' in bootstrap_spec
+        and 'create namespace "$ns" --dry-run=client -o yaml' in bootstrap_spec and "--create-namespace" not in bootstrap_spec
+        and bootstrap_spec.index('label namespace "$ns"') < bootstrap_spec.index('"$H" upgrade --install')
+        and 'A="${argocd_namespace}"' in bootstrap_spec and 'M="${monitoring_namespace}"' in bootstrap_spec
+        and re.search(r'k8s_argocd_namespace\s+= "argocd"', path_tf) and re.search(r'k8s_monitoring_namespace\s+= "monitoring"', path_tf),
     "no impersonation": "--as" not in deploy_spec and "--as" not in bootstrap_spec,
+    "helm and the Argo CD chart pinned with fixed checksums, the same as CI's":
+        re.fullmatch(r"v\d+\.\d+\.\d+", tf_pins.get("helm_version", "")) is not None
+        and all(re.fullmatch(r"[0-9a-f]{64}", tf_pins.get(k, "")) for k in ("helm_sha256", "argocd_chart_sha256"))
+        and (tf_pins.get("helm_version"), tf_pins.get("helm_sha256"), tf_pins.get("argocd_chart_version"), tf_pins.get("argocd_chart_sha256"))
+        == (install_pins.get("HELM_VERSION"), install_pins.get("HELM_SHA256"), install_pins.get("ARGOCD_CHART_VERSION"),
+            install_pins.get("ARGOCD_CHART_SHA256")),
+    # PLAN-time knowledge: the plan text must show both buildspecs, not "(known after apply)".
+    "both buildspecs take only values known at PLAN (an allowlist)": "local.k8s_cluster_name" in bootstrap_inputs
+        and "local.account_id" in deploy_inputs and not unknown_at_plan(bootstrap_inputs, LOCALS)
+        and not unknown_at_plan(deploy_inputs, LOCALS),
+    "the allowlisted attributes are known at PLAN": known_attributes_are_known(),
+    **{f"negative control: {name} in the bootstrap buildspec is caught": bool(found) for name, found in unknown_controls.items()},
+    "negative control: an attribute reached through a local is caught": unknown_at_plan(bootstrap_inputs, indirect)
+        == ["local.k8s_cluster_name: aws_iam_role.codebuild_bootstrap[0].arn"],
+    # run-codebuild.sh stops reading logs at the first terminal match; the bootstrap's is checked in
+    # test_cluster_addons.py, and in the deploy only the result lines may match.
+    "deploy evidence: only the result lines match the terminal regex": bool(evidence_lines["deploy"]) and all(
+        bool(re.search(r"result=|bootstrap=", line)) == line.startswith("result=") for line in evidence_lines["deploy"]),
+    # The inline buildspec limit is not on the CodeBuild quotas page; a secondary source says 25,600.
+    **{f"{name} buildspec renders to at most 20,000 characters (about {size:,})": size <= 20000 for name, size in sizes.items()},
+    "build timeouts: bootstrap 25, deploy 30, each queued at most 10": timeouts == {"bootstrap": (25, 10), "deploy": (30, 10)},
+    "workflow waits cover queue plus build: bootstrap 35, deploy 45":
+        wait.get("Bootstrap cluster add-ons") == 35 >= sum(timeouts["bootstrap"])
+        and wait.get("Deploy digest-pinned image") == 45 >= sum(timeouts["deploy"]),
+    "job timeout covers both waits and cleanup, inside the role session":
+        deploy_jobs["timeout-minutes"] == 90 >= wait.get("Bootstrap cluster add-ons", 99) + wait.get("Deploy digest-pinned image", 99) + 5
+        and deploy_jobs["timeout-minutes"] <= session == 120,
     # Release role IAM
     "release role can only push images and run the two builds": release_allowed == {
         "ecr:GetAuthorizationToken", "ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:CompleteLayerUpload",

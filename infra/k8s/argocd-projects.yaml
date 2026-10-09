@@ -1,0 +1,54 @@
+# Argo CD AppProjects, applied by the bootstrap build. A project bounds its Applications' source,
+# destination and kinds: an Argo CD-level guard, not Kubernetes least privilege (the application
+# controller's ClusterRole is cluster-admin equivalent). No project lists sourceNamespaces, so only
+# Applications in argocd, which only the bootstrap writes, can use them.
+#
+# default: locked, in case an Application names it (the API server, which would create it, never runs).
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: default
+  namespace: argocd
+spec:
+  description: Locked; every FinRisk Application names its own project.
+  sourceRepos: []
+  destinations: []
+  clusterResourceWhitelist: []
+  # An empty list, unlike an absent one, permits no namespaced kind.
+  namespaceResourceWhitelist: []
+---
+# finrisk-monitoring: one OCI chart, into monitoring, only the kinds its lean render contains
+# (check_monitoring_stack.py), cluster-scoped ones only under the release's names (name globs).
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: finrisk-monitoring
+  namespace: argocd
+spec:
+  description: Lean kube-prometheus-stack (operator, kube-state-metrics, Prometheus) in namespace monitoring.
+  sourceRepos:
+    - oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: monitoring
+  clusterResourceWhitelist:
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+      name: "*.monitoring.coreos.com"
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+      name: monitoring-*
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+      name: monitoring-*
+  namespaceResourceWhitelist:
+    - group: ""
+      kind: ServiceAccount
+    - group: ""
+      kind: Service
+    - group: apps
+      kind: Deployment
+    - group: monitoring.coreos.com
+      kind: Prometheus
+    - group: monitoring.coreos.com
+      kind: ServiceMonitor
