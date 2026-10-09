@@ -46,7 +46,7 @@ jobs:
           docker run --rm --read-only --tmpfs /tmp --entrypoint python "finrisk-ai:sha-${GITHUB_SHA}" \
             -c 'import finrisk.serving, sklearn.ensemble, sklearn.impute, scipy, numpy, pandas, joblib'
 
-      # Runs the image as infra/k8s/inference.yaml does: read-only root, writable /tmp, no
+      # Runs the image as the chart's Deployment does: read-only root, writable /tmp, no
       # capabilities, no privilege escalation, the same memory limit. A PR checkout has no model
       # file (model/.gitignore), so the service must be live, report not ready and still serve
       # /metrics. The probe deadline ends the step; timeout-minutes is the backstop if a command

@@ -16,7 +16,8 @@ eks = (TF / "eks.tf").read_text()
 path_tf = (TF / "deploy_path.tf").read_text()
 deploy_spec = (TF / "deploy/deploy-buildspec.yml.tftpl").read_text()
 bootstrap_spec = (TF / "deploy/bootstrap-buildspec.yml.tftpl").read_text()
-manifest = (ROOT / "infra/k8s/inference.yaml").read_text()
+variables = (TF / "variables.tf").read_text()
+inference_app = [d for d in yaml.safe_load_all((ROOT / "infra/k8s/inference-app.yaml").read_text()) if d]
 release = json.loads((ROOT / "docs/aws-release-policy.json").read_text())
 release_trust = json.loads((ROOT / "docs/aws-release-trust-policy.json").read_text())
 deployer_path = json.loads((ROOT / "docs/aws-deployer-deploy-path-policy.json").read_text())
@@ -35,6 +36,13 @@ ACCOUNT, REGION, REPO = "780976819607", "us-east-1", "finrisk-ai-inference"
 CODEBUILD_ROLE = f"arn:aws:iam::{ACCOUNT}:role/finrisk-ai-codebuild-deploy-example"
 EDIT = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy"
 CLUSTER_ADMIN = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+GROUP = "finrisk-digest-writer"
+# The one IAM change of V2 PR 2b: the runners' access entries may carry this group, and no other.
+ACCESS_ENTRY_CONDITION = {
+    "ArnLike": {"eks:principalArn": f"arn:aws:iam::{ACCOUNT}:role/finrisk-ai-codebuild-*"},
+    "StringEquals": {"eks:accessEntryType": "STANDARD"},
+    "ForAllValues:StringEquals": {"eks:kubernetesGroups": GROUP},
+    "Null": {"eks:username": "true"}}
 
 
 def as_list(v):
@@ -76,6 +84,15 @@ def unknown_condition_keys(policy):
     return bad
 
 
+def template_variables(template, cfg):
+    """The ${name} a buildspec template uses, and the names its templatefile call passes; templatefile
+    fails at PLAN on a missing one."""
+    used = set(re.findall(r"(?<!\$)\$\{(\w+)\}", template))
+    call = cfg[cfg.index("buildspec = templatefile("):]
+    passed = set(re.findall(r"^\s+(\w+)\s+=", call[:call.index("\n    })")], re.M))
+    return used, passed
+
+
 def kubectl_checked(deploy, bootstrap):
     """Both buildspecs install kubectl only after checking it against the pinned sha256: the deploy
     inline, the bootstrap through fetch (defined first, and checking every download)."""
@@ -101,7 +118,7 @@ def render(tpl, **values):
 # timestamp) is refused: it could make the buildspec "(known after apply)" in the plan, and the
 # cluster-admin buildspec would no longer be reviewed.
 FUNCTIONS = {"templatefile", "file", "filesha256", "base64gzip", "base64encode", "jsonencode", "jsondecode",
-             "join", "format", "lower", "upper", "replace"}
+             "join", "format", "lower", "upper", "replace", "coalesce"}
 KNOWN_AT_PLAN = {"aws_ecr_repository.inference.name", "data.aws_caller_identity.current.account_id"}
 REFERENCE = re.compile(r"(?<![\w.\]])([A-Za-z_][\w-]*)((?:\s*\.\s*(?:[A-Za-z_][\w-]*|\*)|\s*\[[^\]]*\])+)")
 
@@ -196,13 +213,54 @@ def known_attributes_are_known():
 
 
 def rendered_size(template, values, embedded):
-    """Approximate rendered length: the template, plus each embedded payload as base64 of its gzip
-    (base64 of the bytes themselves where not compressed), plus the plain values. Gzip level 1
-    compresses less than Terraform's base64gzip, so this errs high."""
-    size = len(template)
-    for name, (data, compressed) in embedded.items():
-        size += len(base64.b64encode(gzip.compress(data, 1) if compressed else data)) - len("${" + name + "}")
-    return size + sum(len(v) for v in values.values())
+    """The rendered length: every ${name} replaced by a value of its real length (values, else a 64-hex
+    sha256), each embedded payload by base64 of its gzip. Python's level 6 came out 24 characters longer
+    than Terraform's base64gzip for the bootstrap bundle (terraform 1.9.8), so this errs slightly high."""
+    rendered = template.replace("$${", "\0")
+    for name, data in embedded.items():
+        rendered = rendered.replace("${" + name + "}", base64.b64encode(gzip.compress(data, 6)).decode())
+    rendered = re.sub(r"\$\{(\w+)\}", lambda m: values.get(m[1], "0" * 64), rendered)
+    return len(rendered.replace("\0", "${"))
+
+
+def access_entry_allowed(condition, principal, entry_type, groups, username=None):
+    """IAM's evaluation of this statement's condition for one CreateAccessEntry request."""
+    keys = {"eks:principalArn": [principal], "eks:accessEntryType": [entry_type], "eks:kubernetesGroups": groups,
+            "eks:username": [username] if username else []}
+    for operator, tests in condition.items():
+        for key, expected in tests.items():
+            present, expected = keys[key], as_list(expected)
+            if operator == "ArnLike":
+                ok = bool(present) and all(matches(v, expected) for v in present)
+            elif operator == "StringEquals":
+                ok = bool(present) and all(v in expected for v in present)
+            elif operator == "ForAllValues:StringEquals":
+                ok = all(v in expected for v in present)
+            elif operator == "ForAnyValue:StringEquals":
+                ok = any(v in expected for v in present)
+            elif operator == "Null":
+                ok = (not present) == (expected == ["true"])
+            else:
+                raise ValueError(operator)
+            if not ok:
+                return False
+    return True
+
+
+RUNNER = f"arn:aws:iam::{ACCOUNT}:role/finrisk-ai-codebuild-deploy-abc"
+ACCESS_ENTRY_REQUESTS = {  # (principal, type, groups, username) -> allowed
+    "a runner entry without groups (V1, PR 2a, the bootstrap's)": ((RUNNER, "STANDARD", []), True),
+    "the deploy runner with the digest-writer group": ((RUNNER, "STANDARD", [GROUP]), True),
+    "system:masters": ((RUNNER, "STANDARD", ["system:masters"]), False),
+    "the group plus system:masters": ((RUNNER, "STANDARD", [GROUP, "system:masters"]), False),
+    "a custom username": ((RUNNER, "STANDARD", [GROUP], "admin"), False),
+    "the group on a non-runner role": ((f"arn:aws:iam::{ACCOUNT}:role/finrisk-ai-eks-nodes-x", "STANDARD", [GROUP]), False),
+    "the group on an EC2_LINUX entry": ((RUNNER, "EC2_LINUX", [GROUP]), False),
+}
+
+
+def access_entry_semantics(condition):
+    return all(access_entry_allowed(condition, *request) == ok for request, ok in ACCESS_ENTRY_REQUESTS.values())
 
 
 # --- IAM evaluation helpers for the boundary (allow + principal match, no deny) ------------
@@ -242,6 +300,21 @@ URI_CASES = {
 uri_results = {v: "ACCEPTED" in subprocess.run(["bash", "-c", uri_script, "uri-check", v],
                                                capture_output=True, text=True).stdout
                for v in URI_CASES}
+# Both builds refuse a gitops revision that is not a commit ("unset" when PLAN passed none), first thing.
+REVISION_CHECKS = {
+    "bootstrap": ('        FINRISK_GITOPS_REVISION=${gitops_revision}\n'
+                  '        [[ "$FINRISK_GITOPS_REVISION" =~ ^[0-9a-f]{40}$ ]] || { echo "gitops revision refused: '
+                  '$FINRISK_GITOPS_REVISION"; exit 1; }\n', bootstrap_spec, "mkdir -p"),
+    "deploy": ('        TARGET_REVISION=${gitops_revision}\n', deploy_spec, "curl -fsSL"),
+}
+revision_refusals = {}
+for name, (line, spec, first) in REVISION_CHECKS.items():
+    check = re.search(r'^.*\[\[ "\$(?:FINRISK_GITOPS_REVISION|TARGET_REVISION)" =~ .*$', spec, re.M)
+    probe = (re.search(r"^ *(\w+)=\$\{gitops_revision\}$", spec, re.M)[1] + '="$1"\n' + check[0] + "\necho ACCEPTED\n") if check else ""
+    revision_refusals[name] = line in spec and spec.index(line) < spec.index(first) and check is not None \
+        and spec.index(check[0]) < spec.index(first) and all(
+            ("ACCEPTED" in subprocess.run(["bash", "-c", probe, "check", v], capture_output=True, text=True).stdout) == ok
+            for v, ok in (("unset", False), ("", False), ("a" * 40, True), ("A" * 40, False), ("a" * 39, False), ("a" * 41, False)))
 
 runtime = json.loads(render(runtime_tpl, region=REGION, account_id=ACCOUNT,
                             subnet_arns='["arn:aws:ec2:us-east-1:780976819607:subnet/subnet-a"]',
@@ -261,6 +334,12 @@ uncovered_startbuild_keys = [
 ]
 release_allowed = {a for s in release["Statement"] if s["Effect"] == "Allow" for a in as_list(s["Action"])}
 deploy_cfg = block(path_tf, 'resource "aws_codebuild_project" "k8s_deploy"')
+deploy_entry = block(path_tf, 'resource "aws_eks_access_entry" "k8s_deploy"')
+bootstrap_entry = block(path_tf, 'resource "aws_eks_access_entry" "k8s_bootstrap"')
+gitops_variable = block(variables, 'variable "gitops_revision"')
+access_statement = stmt(deployer_path, "CreateCodeBuildAccessEntries")
+role = next((d for d in inference_app if d["kind"] == "Role"), {})
+binding = next((d for d in inference_app if d["kind"] == "RoleBinding"), {})
 bootstrap_cfg = block(path_tf, 'resource "aws_codebuild_project" "k8s_bootstrap"')
 edit_assoc = block(path_tf, 'resource "aws_eks_access_policy_association" "k8s_deploy_edit"')
 admin_assoc = block(path_tf, 'resource "aws_eks_access_policy_association" "k8s_bootstrap_cluster_admin"')
@@ -284,6 +363,8 @@ UNKNOWN_INPUTS = {
 unknown_controls = {name: unknown_at_plan(buildspec_inputs(bootstrap_cfg.replace(
     "      cluster_name ", f"      {line}\n      cluster_name ", 1)), LOCALS) for name, line in UNKNOWN_INPUTS.items()}
 indirect = dict(LOCALS, k8s_cluster_name=" aws_iam_role.codebuild_bootstrap[0].arn\n")
+# The image repository spelled out from known values; repository_url is unknown until the repository exists.
+url_repository = dict(LOCALS, inference_repository=" aws_ecr_repository.inference.repository_url\n")
 install_pins = dict(re.findall(r'^(\w+)="([^"]+)"$', install, re.M))
 tf_pins = dict(re.findall(r'^  (\w+)\s+= "([^"]*)"$', path_tf, re.M))
 deploy_jobs = yaml.safe_load(deploy_wf)["jobs"]["deploy"]
@@ -295,10 +376,14 @@ manifests = ROOT / "infra/k8s"
 # The bootstrap's bundle as deploy_path.tf builds it: a "#==> <file>" line before each file.
 bundle = "".join(f"#==> {f}\n" + (manifests / f).read_text()
                  for f in re.findall(r'"([^"]+)"', re.search(r"k8s_bootstrap_files\s+= \[(.*)\]", path_tf)[1])).encode()
+REAL = {"cluster_name": "finrisk-ai-portfolio", "region": REGION, "account_id": ACCOUNT, "repository": REPO, "namespace": "finrisk",
+        "argocd_namespace": "argocd", "monitoring_namespace": "monitoring", "app": "finrisk-inference", "node_instance_type": "m7i-flex.large",
+        "kubectl_version": "v1.35.9", "helm_version": "v4.3.0", "argocd_chart_version": "10.9.6", "gitops_revision": "a" * 40,
+        "image_repository": f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/{REPO}", "repo_url": "https://github.com/ccooper-data/finrisk-ai.git",
+        "chart_path": "charts/finrisk-inference", "prometheus_url": "http://monitoring-prometheus.monitoring.svc.cluster.local:9090"}
 sizes = {
-    "bootstrap": rendered_size(bootstrap_spec, {"cluster_name": "finrisk-ai-portfolio"}, {"k8s_bundle_b64": (bundle, True)}),
-    "deploy": rendered_size(deploy_spec, {"cluster_name": "finrisk-ai-portfolio"},
-                            {"manifest_b64": ((manifests / "inference.yaml").read_bytes(), False)}),
+    "bootstrap": rendered_size(bootstrap_spec, REAL, {"k8s_bundle_b64": bundle}),
+    "deploy": rendered_size(deploy_spec, REAL, {}),
 }
 evidence_lines = {name: re.findall(r'(?:echo "|print\(")FINRISK_EVIDENCE ([^"]*)"', spec) for name, spec in
                   (("bootstrap", bootstrap_spec), ("deploy", deploy_spec))}
@@ -334,10 +419,9 @@ checks = {
     "negative control: the deploy's kubectl without its checksum is caught": not kubectl_checked(
         deploy_spec.replace('        echo "${kubectl_sha256}  /tmp/kubectl" | sha256sum --check --strict\n', ""), bootstrap_spec),
     # Buildspecs and manifest
-    "deploy validates FINRISK_IMAGE_URI before use": deploy_spec.index("FINRISK_IMAGE_URI rejected") < deploy_spec.index("curl -fsSLo"),
+    "deploy validates FINRISK_IMAGE_URI before use": deploy_spec.index("FINRISK_IMAGE_URI rejected") < deploy_spec.index("curl -fsSL "),
     "URI check accepts only the digest-pinned repo URI": all(uri_results[v] == ok for v, ok in URI_CASES.items()),
-    "deploy manifest has no Namespace (Edit cannot create it)": "kind: Namespace" not in manifest,
-    "HPA owns replicas": re.search(r"^\s*replicas:", manifest, re.M) is None,
+    **{f"{name} refuses a gitops revision that is not a commit, before anything else": ok for name, ok in revision_refusals.items()},
     "bootstrap creates its three namespaces idempotently, labelled before helm runs":
         'for ns in "${namespace}" "$A" "$M"; do' in bootstrap_spec
         and 'create namespace "$ns" --dry-run=client -o yaml' in bootstrap_spec and "--create-namespace" not in bootstrap_spec
@@ -345,6 +429,34 @@ checks = {
         and 'A="${argocd_namespace}"' in bootstrap_spec and 'M="${monitoring_namespace}"' in bootstrap_spec
         and re.search(r'k8s_argocd_namespace\s+= "argocd"', path_tf) and re.search(r'k8s_monitoring_namespace\s+= "monitoring"', path_tf),
     "no impersonation": "--as" not in deploy_spec and "--as" not in bootstrap_spec,
+    # The commit pin is a literal in the build command, never an environment variable a StartBuild could
+    # override, and only the bootstrap names it FINRISK_GITOPS_REVISION (the PLAN step greps for it).
+    "FINRISK_GITOPS_REVISION: a literal in the bootstrap's command only, no buildspec or project variables":
+        bootstrap_spec.count("FINRISK_GITOPS_REVISION=") == 1 and "FINRISK_GITOPS_REVISION" not in deploy_spec
+        and not re.search(r"^\s*(variables|parameter-store|secrets-manager|exported-variables):", bootstrap_spec + deploy_spec, re.M)
+        and "environment_variable" not in bootstrap_cfg
+        and re.findall(r'environment_variable \{\s*name\s+= "(\w+)"', deploy_cfg) == ["FINRISK_IMAGE_URI"],
+    "gitops_revision: null by default (DESTROY, the reaper), else a full commit SHA": 'type        = string' in gitops_variable
+        and "default     = null" in gitops_variable and "nullable    = true" in gitops_variable
+        and 'var.gitops_revision == null || can(regex("^[0-9a-f]{40}$", var.gitops_revision))' in gitops_variable
+        and re.search(r'^  gitops_revision\s+= coalesce\(var\.gitops_revision, "unset"\)$', path_tf, re.M) is not None,
+    "both buildspecs get the commit, the bootstrap also the image repository; the deploy has no manifest":
+        re.search(r"^\s+gitops_revision\s+= local\.gitops_revision$", bootstrap_cfg, re.M) is not None
+        and re.search(r"^\s+image_repository\s+= local\.inference_repository$", bootstrap_cfg, re.M) is not None
+        and all(re.search(rf"^\s+{k}\s+= local\.{v}$", deploy_cfg, re.M) for k, v in (
+            ("gitops_revision", "gitops_revision"), ("repo_url", "gitops_repo_url"), ("chart_path", "gitops_chart_path"),
+            ("prometheus_url", "prometheus_url")))
+        and "manifest_b64" not in path_tf + deploy_spec and not (ROOT / "infra/k8s/inference.yaml").exists(),
+    # Kubernetes group: the deploy runner's entry only, the same literal in Terraform, IAM and the RoleBinding.
+    "the deploy runner's access entry carries exactly the digest-writer group; the bootstrap's none":
+        "kubernetes_groups = [local.k8s_digest_writer_group]" in deploy_entry and "kubernetes_groups" not in bootstrap_entry
+        and path_tf.count("kubernetes_groups") == 1
+        and re.search(rf'^  k8s_digest_writer_group\s+= "{GROUP}"$', path_tf, re.M) is not None,
+    "the RoleBinding binds that group to the Role, in finrisk": binding.get("subjects") == [
+        {"apiGroup": "rbac.authorization.k8s.io", "kind": "Group", "name": GROUP}]
+        and binding.get("roleRef") == {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": role.get("metadata", {}).get("name")}
+        and binding["metadata"].get("namespace") == role["metadata"].get("namespace") == "finrisk",
+    "the Edit association is unchanged (namespace finrisk)": edit_assoc.count("namespaces = [local.k8s_app_namespace]") == 1,
     "helm and the Argo CD chart pinned with fixed checksums, the same as CI's":
         re.fullmatch(r"v\d+\.\d+\.\d+", tf_pins.get("helm_version", "")) is not None
         and all(re.fullmatch(r"[0-9a-f]{64}", tf_pins.get(k, "")) for k in ("helm_sha256", "argocd_chart_sha256"))
@@ -352,6 +464,11 @@ checks = {
         == (install_pins.get("HELM_VERSION"), install_pins.get("HELM_SHA256"), install_pins.get("ARGOCD_CHART_VERSION"),
             install_pins.get("ARGOCD_CHART_SHA256")),
     # PLAN-time knowledge: the plan text must show both buildspecs, not "(known after apply)".
+    "each buildspec template uses exactly the variables Terraform passes it": all(
+        used == passed and used for used, passed in (template_variables(bootstrap_spec, bootstrap_cfg),
+                                                     template_variables(deploy_spec, deploy_cfg))),
+    "negative control: a template variable Terraform does not pass is caught": (lambda u, p: u != p)(
+        *template_variables(deploy_spec + "${digest_writer_group}", deploy_cfg)),
     "both buildspecs take only values known at PLAN (an allowlist)": "local.k8s_cluster_name" in bootstrap_inputs
         and "local.account_id" in deploy_inputs and not unknown_at_plan(bootstrap_inputs, LOCALS)
         and not unknown_at_plan(deploy_inputs, LOCALS),
@@ -359,6 +476,13 @@ checks = {
     **{f"negative control: {name} in the bootstrap buildspec is caught": bool(found) for name, found in unknown_controls.items()},
     "negative control: an attribute reached through a local is caught": unknown_at_plan(bootstrap_inputs, indirect)
         == ["local.k8s_cluster_name: aws_iam_role.codebuild_bootstrap[0].arn"],
+    "the image repository and the commit reach the buildspecs through the allowlist (never repository_url)":
+        "local.inference_repository" in bootstrap_inputs and "local.gitops_revision" in bootstrap_inputs
+        and "local.gitops_revision" in deploy_inputs and "inference.repository_url" not in path_tf
+        and re.search(r'^  inference_repository\s+= "\$\{local\.account_id\}\.dkr\.ecr\.\$\{var\.aws_region\}\.amazonaws\.com/'
+                      r'\$\{aws_ecr_repository\.inference\.name\}"$', path_tf, re.M) is not None,
+    "negative control: the image repository as repository_url is caught": unknown_at_plan(bootstrap_inputs, url_repository)
+        == ["local.inference_repository: aws_ecr_repository.inference.repository_url"],
     # run-codebuild.sh stops reading logs at the first terminal match; the bootstrap's is checked in
     # test_cluster_addons.py, and in the deploy only the result lines may match.
     "deploy evidence: only the result lines match the terminal regex": bool(evidence_lines["deploy"]) and all(
@@ -421,7 +545,18 @@ checks = {
     "boundary cannot be removed or edited": {"iam:DeleteRolePermissionsBoundary", "iam:PutRolePermissionsBoundary"}
         <= set(stmt(deployer_path, "DenyBoundaryRemoval")["Action"])
         and "iam:CreatePolicyVersion" in stmt(deployer_path, "DenyBoundaryPolicyEdits")["Action"],
-    "deployer managed policy fits": len(json.dumps(deployer_path, separators=(",", ":"))) <= 6144,
+    f"deployer managed policy fits ({len(json.dumps(deployer_path, separators=(',', ':'))):,} of 6,144 characters minified)":
+        len(json.dumps(deployer_path, separators=(",", ":"))) <= 6144,
+    "runner access entries: the digest-writer group or none, no username, STANDARD, runner roles only (exact condition)":
+        access_statement["Condition"] == ACCESS_ENTRY_CONDITION and access_statement["Action"] == "eks:CreateAccessEntry",
+    "IAM evaluation of that condition: no groups or the one group allowed; any other group, a username or another role denied":
+        access_entry_semantics(access_statement["Condition"]),
+    "negative control: ForAnyValue (any one matching group) is caught": not access_entry_semantics(
+        {**ACCESS_ENTRY_CONDITION, "ForAnyValue:StringEquals": {"eks:kubernetesGroups": GROUP}} | {"ForAllValues:StringEquals": {}}),
+    "negative control: dropping the group condition is caught": not access_entry_semantics(
+        {k: v for k, v in ACCESS_ENTRY_CONDITION.items() if k != "ForAllValues:StringEquals"}),
+    "negative control: the V1 condition (no groups at all) is caught": not access_entry_semantics(
+        {**ACCESS_ENTRY_CONDITION, "Null": {"eks:kubernetesGroups": "true", "eks:username": "true"}}),
     # Boundary covers the runners, and only the runners
     "boundary allows every runner action": all(boundary_allows(a, CODEBUILD_ROLE) for a in runtime_actions),
     "runners get no node or cluster workload permissions": not any(boundary_allows(a, CODEBUILD_ROLE) for a in (

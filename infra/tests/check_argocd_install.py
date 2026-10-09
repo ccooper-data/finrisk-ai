@@ -3,8 +3,9 @@
 # it, and checks what the bootstrap and the AppProjects rely on: digest-pinned images, Pod Security
 # restricted, nothing exposed, a headless install, and no cluster rights beyond the application
 # controller's. Every property is also checked against a deliberately broken copy of the values and
-# must fail there. kubeconform -strict validates the render, and the AppProjects and Application in
-# infra/k8s against the chart's own CRDs. It needs the tools .github/scripts/install-k8s-tools.sh
+# must fail there. kubeconform -strict validates the render, and the AppProjects and Applications in
+# infra/k8s against the chart's own CRDs (with the digest writer's Role and RoleBinding against the
+# Kubernetes schemas). It needs the tools .github/scripts/install-k8s-tools.sh
 # installs into $K8S_TOOLS, so it is not named test_*.py; terraform-validate.yml runs it after the install.
 import copy
 import hashlib
@@ -13,7 +14,7 @@ import re
 import yaml
 
 from k8s_tools import (ARGOCD_CHART, DIGEST, HELM, K8S, KUBECONFORM, PINS, ROOT, argocd, containers, kubeconform,
-                       manifest, pod_templates, report, require, run)
+                       load_all, manifest, pod_templates, report, require, run)
 from pod_security import restricted
 
 require("Argo CD install acceptance")
@@ -128,6 +129,11 @@ _, docs = argocd(VALUES)
 found = properties(docs)
 chart = yaml.safe_load(run(HELM, "show", "chart", ARGOCD_CHART).stdout or "{}") or {}
 projects, application = manifest("argocd-projects.yaml"), manifest("monitoring-app.yaml")
+# As the bootstrap applies it: the PLAN's commit and the image repository in place of the placeholders.
+gitops = load_all((K8S / "inference-app.yaml").read_text().replace("GITOPS_REVISION", "0" * 40).replace(
+    "IMAGE_REPOSITORY", "780976819607.dkr.ecr.us-east-1.amazonaws.com/finrisk-ai-inference"))
+misspelled = copy.deepcopy(gitops)
+next(d for d in misspelled if d["kind"] == "Application")["spec"]["source"]["helm"]["parameter"] = []
 # The pinned Kubernetes schemas have none for CustomResourceDefinition; the API server validates the
 # chart's three CRDs at install, and the Argo CD objects are validated against them below.
 objects = [d for d in docs if d["kind"] != "CustomResourceDefinition"]
@@ -143,6 +149,9 @@ checks = {
         len(objects) == len(docs) - 3 and kubeconform(yaml.safe_dump_all(objects), len(objects)),
     "kubeconform -strict, AppProjects and Application against the chart's CRDs": kubeconform(
         yaml.safe_dump_all(projects + application), len(projects + application)),
+    "kubeconform -strict, the inference Application, its Role and RoleBinding": [d["kind"] for d in gitops]
+        == ["Role", "RoleBinding", "Application"] and kubeconform(yaml.safe_dump_all(gitops), 3),
+    "negative control: a misspelled Application field fails kubeconform -strict": not kubeconform(yaml.safe_dump_all(misspelled), 3),
 }
 for name, (change, prop) in CONTROLS.items():
     _, mutated = argocd(broken(change))

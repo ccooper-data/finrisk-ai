@@ -1,9 +1,7 @@
-# Argo CD AppProjects, applied by the bootstrap build. A project bounds its Applications' source,
-# destination and kinds: an Argo CD-level guard, not Kubernetes least privilege (the application
-# controller's ClusterRole is cluster-admin equivalent). No project lists sourceNamespaces, so only
-# Applications in argocd, which only the bootstrap writes, can use them.
+# AppProjects bound each Application's source, destination and kinds: an Argo CD guard, not Kubernetes
+# least privilege. Only finrisk accepts Applications from outside argocd (from finrisk alone).
 #
-# default: locked, in case an Application names it (the API server, which would create it, never runs).
+# default: locked, in case an Application names it.
 apiVersion: argoproj.io/v1alpha1
 kind: AppProject
 metadata:
@@ -50,5 +48,31 @@ spec:
       kind: Deployment
     - group: monitoring.coreos.com
       kind: Prometheus
+    - group: monitoring.coreos.com
+      kind: ServiceMonitor
+---
+# finrisk: the inference chart from this repository, only its kinds, nothing cluster-scoped.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: finrisk
+  namespace: argocd
+spec:
+  description: The FinRisk inference chart from this repository, into namespace finrisk.
+  sourceNamespaces:
+    - finrisk
+  sourceRepos:
+    - https://github.com/ccooper-data/finrisk-ai.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: finrisk
+  clusterResourceWhitelist: []
+  namespaceResourceWhitelist:
+    - group: apps
+      kind: Deployment
+    - group: ""
+      kind: Service
+    - group: autoscaling
+      kind: HorizontalPodAutoscaler
     - group: monitoring.coreos.com
       kind: ServiceMonitor

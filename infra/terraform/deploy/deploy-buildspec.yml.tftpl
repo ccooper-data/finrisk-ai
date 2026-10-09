@@ -1,10 +1,9 @@
 version: 0.2
 
-# Workload deploy. Runs as a role holding AmazonEKSEditPolicy scoped to the ${namespace}
-# namespace only. This file is fixed by Terraform and reviewed with the plan. The release
-# role can set exactly one StartBuild override, FINRISK_IMAGE_URI; IAM denies every other
-# override that has a condition key (timeout and debug-session overrides have none, and debug
-# sessions cannot connect without ssmmessages permissions). The value is validated again below.
+# Deploy through Argo CD, as Edit in ${namespace} plus a group that may only read and patch the
+# Application ${namespace}/${app}; the only write is image.digest. Fixed by Terraform, reviewed with
+# the plan; IAM lets the release role override only FINRISK_IMAGE_URI, checked again below. Waits
+# bounded; only the last evidence line has "result=".
 
 env:
   shell: bash
@@ -16,6 +15,7 @@ phases:
         set -euo pipefail
         NS="${namespace}"
         APP="${app}"
+        TARGET_REVISION=${gitops_revision}
 
         # Defense in depth behind IAM: exact registry, repository and digest form; no tags,
         # no other registry or repository, nothing after the digest.
@@ -23,11 +23,13 @@ phases:
           echo "FINRISK_IMAGE_URI rejected"
           exit 1
         fi
+        DIGEST="$${FINRISK_IMAGE_URI#*@}"
+        # The PLAN's commit, which the bootstrap pinned the Application to ("unset" without -var).
+        [[ "$TARGET_REVISION" =~ ^[0-9a-f]{40}$ ]] || { echo "gitops revision refused: $TARGET_REVISION"; exit 1; }
 
-        # Pinned kubectl (within one minor version of the cluster), verified against a
-        # checksum fixed in this file rather than one fetched from the same origin.
+        # Pinned kubectl, verified against a checksum fixed in this file.
         mkdir -p /opt/finrisk/bin
-        curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/${kubectl_version}/bin/linux/amd64/kubectl"
+        curl -fsSL --retry 3 --retry-connrefused --retry-max-time 20 --max-time 40 -o /tmp/kubectl "https://dl.k8s.io/release/${kubectl_version}/bin/linux/amd64/kubectl"
         echo "${kubectl_sha256}  /tmp/kubectl" | sha256sum --check --strict
         install -m 0755 /tmp/kubectl /opt/finrisk/bin/kubectl
         K=/opt/finrisk/bin/kubectl
@@ -35,17 +37,131 @@ phases:
 
         aws eks update-kubeconfig --name "${cluster_name}" --region "${region}"
 
-        # Access entries are eventually consistent, and the namespace must already exist
-        # (created by the bootstrap project); this role cannot create it.
-        for attempt in 1 2 3 4 5 6 7 8 9 10; do
-          if "$K" -n "$NS" get serviceaccount default >/dev/null 2>&1; then break; fi
-          if [ "$attempt" = 10 ]; then echo "namespace $NS is not reachable (run the bootstrap build first)"; exit 1; fi
-          sleep 6
-        done
+        # Polls a check every 5 s for up to $1 s; kq bounds each call.
+        wait_for() {
+          local deadline=$(( $(date +%s) + $1 ))
+          shift
+          until "$@"; do
+            [ "$(date +%s)" -lt "$deadline" ] || return 1
+            sleep 5
+          done
+        }
+        kq() { "$K" --request-timeout=10s "$@"; }
 
-        echo "${manifest_b64}" | base64 -d > /tmp/manifest.yaml
-        test "$(grep -c FINRISK_IMAGE_PLACEHOLDER /tmp/manifest.yaml)" = 1
-        sed -i "s#FINRISK_IMAGE_PLACEHOLDER#$FINRISK_IMAGE_URI#" /tmp/manifest.yaml
+        # Access entries are eventually consistent; the bootstrap created the namespace.
+        reachable() { kq -n "$NS" get serviceaccount default >/dev/null 2>&1; }
+        wait_for 60 reachable || { echo "namespace $NS is not reachable (run the bootstrap build first)"; exit 1; }
+
+        # Live authorization, before any change; any other answer stops here.
+        authz="" unexpected=""
+        expect() {  # <name> <yes|no> <auth can-i arguments>
+          local answer
+          answer="$(kq auth can-i "$${@:3}" 2>/dev/null)" || true
+          answer="$${answer%% *}"
+          authz+=" $1=$${answer:-error}"
+          [ "$answer" = "$2" ] || unexpected+=" $1"
+        }
+        expect patch_app yes patch "applications.argoproj.io/$APP" -n "$NS"
+        expect get_app yes get "applications.argoproj.io/$APP" -n "$NS"
+        expect patch_other_app no patch applications.argoproj.io/finrisk-other -n "$NS"
+        expect create_app no create applications.argoproj.io -n "$NS"
+        expect delete_app no delete "applications.argoproj.io/$APP" -n "$NS"
+        expect patch_appproject no patch appprojects.argoproj.io -n "${argocd_namespace}"
+        expect argocd_secrets no get secrets -n "${argocd_namespace}"
+        expect create_rolebindings no create rolebindings.rbac.authorization.k8s.io -n "$NS"
+        echo "FINRISK_EVIDENCE authz$authz"
+        [ -z "$unexpected" ] || { echo "unexpected authorization:$unexpected; nothing changed"; exit 1; }
+
+        # validate <uri>: the bootstrap's Application but for the digest, nothing pending; prints the digest.
+        # state <digest>: one poll; converged when all of `ok` holds (never on a previous digest's status).
+        cat > /tmp/app.py <<'PY'
+        import json
+        import re
+        import sys
+
+        REVISION, MODE, WANT = "${gitops_revision}", sys.argv[1], sys.argv[2]
+        doc = json.load(sys.stdin)
+        kinds = {i.get("kind"): i for i in (doc["items"] if doc.get("kind") == "List" else [doc])}
+        app, dep = kinds.get("Application") or {}, kinds.get("Deployment") or {}
+        spec, status = app.get("spec") or {}, app.get("status") or {}
+
+        def dig(obj, *path):
+            for key in path:
+                obj = obj.get(key) if isinstance(obj, dict) else None
+            return obj
+
+        def digest(source):
+            return next((p.get("value") for p in dig(source, "helm", "parameters") or [] if p.get("name") == "image.digest"), "none")
+
+        if MODE == "validate":
+            reviewed = {"project": "${namespace}", "destination": {"server": "https://kubernetes.default.svc", "namespace": "${namespace}"},
+                        "source": {"repoURL": "${repo_url}", "path": "${chart_path}", "targetRevision": REVISION, "helm": {"releaseName": "${app}",
+                                   "valuesObject": {"image": {"repository": WANT.split("@")[0]}, "serviceMonitor": {"enabled": True}}}},
+                        "syncPolicy": {"automated": {"enabled": True, "prune": True, "selfHeal": True}, "syncOptions": ["FailOnSharedResource=true"],
+                                       "retry": {"limit": 3, "backoff": {"duration": "10s", "factor": 2, "maxDuration": "1m"}}}}
+            found = json.loads(json.dumps(spec))
+            helm = dig(found, "source", "helm")
+            params = helm.pop("parameters", []) if isinstance(helm, dict) else []
+            bad = sorted(k for k in {*found, *reviewed} if found.get(k) != reviewed.get(k)) + [k for k, ok in {
+                "parameters": isinstance(params, list) and len(params) <= 1 and all(isinstance(p, dict) and re.fullmatch(
+                    "sha256:[0-9a-f]{64}", str(p.get("value"))) and p == {"name": "image.digest", "value": p["value"], "forceString": True} for p in params),
+                "operation": not app.get("operation"),
+                "metadata": not {"deletionTimestamp", "finalizers"} & set(app.get("metadata") or {}),
+            }.items() if not ok]
+            if bad:
+                sys.exit("Application not as reviewed (%s): %s" % (", ".join(bad), json.dumps(spec)))
+            print(digest(spec["source"]))
+            sys.exit()
+
+        sync, op = status.get("sync") or {}, status.get("operationState") or {}
+        started = op.get("operation") or {}
+        # Argo CD v3.5.3's autoSync copies spec.source into its operation; another source is an override.
+        override = [k for k in ("sources", "manifests") if dig(started, "sync", k)]
+        override += ["source"] if dig(started, "sync", "source") not in (None, spec.get("source")) else []
+        image = next((c.get("image") for c in dig(dep, "spec", "template", "spec", "containers") or [] if c.get("name") == "inference"), "none")
+        progress = [c.get("reason") for c in dig(dep, "status", "conditions") or [] if c.get("type") == "Progressing"]
+        conditions = [c.get("type") for c in status.get("conditions") or []]
+        f = {"sync": sync.get("status"), "revision": sync.get("revision"), "compared": digest(dig(sync, "comparedTo", "source")),
+             "operation": op.get("phase"), "synced": digest(dig(op, "syncResult", "source")),
+             "synced_revision": dig(op, "syncResult", "revision"), "health": dig(status, "health", "status"),
+             "automated": dig(started, "initiatedBy", "automated") is True, "overrides": ",".join(override) or "none",
+             "image": image, "ready": dig(dep, "status", "readyReplicas") or 0, "conditions": ",".join(conditions) or "none",
+             "images": ",".join(dig(status, "summary", "images") or []) or "none"}
+        # The Deployment's status is for its current template, not the previous image's.
+        observed = (dig(dep, "status", "observedGeneration") or 0) >= (dig(dep, "metadata", "generation") or 1)
+        ok = {
+            "sync": f["sync"] == "Synced",
+            "revision": f["revision"] == REVISION,
+            "operation_revision": dig(started, "sync", "revision") in (None, REVISION),
+            "compared": f["compared"] == WANT,
+            "operation": f["operation"] == "Succeeded",
+            "synced": f["synced"] == WANT,
+            "synced_revision": f["synced_revision"] == REVISION,
+            "automated": f["automated"],
+            "override": not override,
+            "health": f["health"] == "Healthy",
+            "image": image == "%s@%s" % (dig(spec, "source", "helm", "valuesObject", "image", "repository"), WANT),
+            "observed": observed,
+            "ready": f["ready"] >= 1,
+        }
+        pending = [k for k, v in ok.items() if not v]
+        if not pending:
+            verdict = "converged"
+        elif (f["operation"] in ("Failed", "Error") and f["synced"] == WANT) or ("SyncError" in conditions and f["compared"] == WANT):
+            verdict = "sync_failed"
+        elif "ProgressDeadlineExceeded" in progress and ok["image"] and observed:
+            verdict = "progress_deadline"
+        else:
+            verdict = "waiting"
+        print(verdict, " ".join("%s=%s" % kv for kv in f.items()), "pending=" + (",".join(pending) or "none"))
+        PY
+
+        app_json() { kq -n "$NS" get applications.argoproj.io "$APP" -o json; }
+        if ! PREV_DIGEST="$(app_json | python3 /tmp/app.py validate "$FINRISK_IMAGE_URI")"; then
+          echo "Application $NS/$APP not read or not as reviewed; nothing changed"
+          exit 1
+        fi
+        echo "FINRISK_EVIDENCE argocd_target_revision=$TARGET_REVISION previous_digest=$PREV_DIGEST"
 
         # In-pod smoke test through the Service: ready, serving the pinned model, and returning
         # a valid probability for a request built from the model's own feature list.
@@ -84,52 +200,106 @@ phases:
               % (EXPECTED, len(features), probability))
         PY
 
-        # Recorded before applying so a failure can return to exactly this revision. Only
-        # NotFound means a first deploy; any other error stops here, before anything changes.
-        PREV_REV="$("$K" -n "$NS" get deployment "$APP" --ignore-not-found -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')"
+        # In-pod PromQL, polled for up to 180 s: both scrapes up and the smoke prediction counted. Run by
+        # the image under test, so self-reported like the smoke result. No minimum: recorded only.
+        cat > /tmp/promql.py <<'PY'
+        import json
+        import math
+        import sys
+        import time
+        import urllib.parse
+        import urllib.request
 
-        # Pod Security admission enforces on Pods, not on the Deployment: a Pod template that violates
-        # the namespace level passes this dry run with only a warning, then fails after the apply as
-        # ReplicaSet FailedCreate. Fail on that warning here, before anything changes. (Not
-        # --warnings-as-errors: any unrelated server warning would then block every deploy.)
-        "$K" apply --server-side --field-manager=finrisk-codebuild --force-conflicts --dry-run=server -f /tmp/manifest.yaml 2>&1 | tee /tmp/dry-run.log
-        if grep -qF "would violate PodSecurity" /tmp/dry-run.log; then
-          echo "manifest rejected: its Pod template violates the namespace's Pod Security level"
-          exit 1
-        fi
+        PROMETHEUS = "${prometheus_url}"
+        NS, APP = 'namespace="${namespace}"', "${app}"
+        PREDICT = NS + ',http_target="/v1/risk/predict"'
+        QUERIES = [
+            ("app_up", 'min(up{%s,service="%s"})' % (NS, APP), 1),
+            ("ksm_up", 'min(up{job="kube-state-metrics"})', 1),
+            ("requests", "sum(http_server_duration_milliseconds_count{%s})" % PREDICT, 1),
+            ("latency_mean_ms", "sum(http_server_duration_milliseconds_sum{%s}) / sum(http_server_duration_milliseconds_count{%s})"
+             % (PREDICT, PREDICT), 0),
+            ("predictions", "sum(finrisk_predictions_total{%s})" % NS, 1),
+            ("inference_p95_ms", "histogram_quantile(0.95, sum by (le) (finrisk_inference_duration_milliseconds_bucket{%s}))" % NS, None),
+            ("replicas_available", 'kube_deployment_status_replicas_available{%s,deployment="%s"}' % (NS, APP), None),
+            ("hpa_current_replicas", 'kube_horizontalpodautoscaler_status_current_replicas{%s,horizontalpodautoscaler="%s"}' % (NS, APP), None),
+        ]
 
+        def value(query):
+            try:
+                url = PROMETHEUS + "/api/v1/query?" + urllib.parse.urlencode({"query": query})
+                with urllib.request.urlopen(url, timeout=5) as response:
+                    result = json.load(response)["data"]["result"]
+                return float(result[0]["value"][1]) if len(result) == 1 else None
+            except (OSError, ValueError, KeyError, IndexError, TypeError):
+                return None
+
+        deadline = time.monotonic() + 180
+        while True:
+            values = {name: value(query) for name, query, _ in QUERIES}
+            missing = [n for n, _, low in QUERIES if low is not None and not (values[n] is not None and math.isfinite(values[n]) and values[n] >= low)]
+            if not missing or time.monotonic() >= deadline:
+                break
+            time.sleep(min(10, max(0, deadline - time.monotonic())))
+        for name, _, _ in QUERIES:
+            print("FINRISK_EVIDENCE promql name=%s value=%s" % (name, "none" if values[name] is None else "%g" % values[name]))
+        if missing:
+            sys.exit("promql failed: " + ", ".join(missing))
+        PY
+
+        # The only write. A merge patch replaces the parameter list; the changed source makes Argo CD
+        # refresh and sync at once.
+        set_digest() {
+          kq -n "$NS" patch applications.argoproj.io "$APP" --type=merge --field-manager=finrisk-digest \
+            -p "{\"spec\":{\"source\":{\"helm\":{\"parameters\":[{\"name\":\"image.digest\",\"value\":\"$1\",\"forceString\":true}]}}}}"
+        }
+        # One poll: done (0) when converged on digest $1, or failed for it ($failure set); else 1.
+        converged() {
+          state="$(kq -n "$NS" get "applications.argoproj.io/$APP" "deployment/$APP" --ignore-not-found -o json \
+            | python3 /tmp/app.py state "$1")" || return 1
+          case "$state" in
+            converged*) return 0 ;;
+            sync_failed*|progress_deadline*) failure="$${state%% *}"; return 0 ;;
+            *) return 1 ;;
+          esac
+        }
+        failure=""
         # Every step checks its own status: set -e does not apply inside a function used as a condition.
         deploy_and_verify() {
-          "$K" apply --server-side --field-manager=finrisk-codebuild --force-conflicts -f /tmp/manifest.yaml || return 1
-          "$K" -n "$NS" rollout status deployment/"$APP" --timeout=300s || return 1
-          ready="$("$K" -n "$NS" get deployment "$APP" -o jsonpath='{.status.readyReplicas}')" || return 1
-          [ "$${ready:-0}" -ge 1 ] || return 1
-          "$K" -n "$NS" exec -i deploy/"$APP" -c inference -- python - < /tmp/smoke.py || return 1
-        }
-
-        rollback() {
-          if [ -n "$PREV_REV" ]; then
-            echo "Rolling back $APP to revision $PREV_REV"
-            "$K" -n "$NS" rollout undo deployment/"$APP" --to-revision="$PREV_REV" || return 1
-            "$K" -n "$NS" rollout status deployment/"$APP" --timeout=300s || return 1
-          else
-            # First deploy: there is no earlier revision to return to. Delete rather than scale
-            # to zero: the HPA never scales up from zero and the manifest sets no replicas, so a
-            # zero-replica Deployment would stay at zero through every later apply. NotFound means
-            # the apply failed before creating it, so there is nothing to remove.
-            echo "First deploy failed; deleting $APP"
-            "$K" -n "$NS" delete deployment "$APP" --ignore-not-found --wait=true || return 1
-          fi
+          set_digest "$DIGEST" || { failure=patch; return 1; }
+          wait_for 480 converged "$DIGEST" || { failure=timeout; return 1; }
+          [ -z "$failure" ] || return 1
+          echo "FINRISK_EVIDENCE argocd digest=$DIGEST $${state#converged }"
+          "$K" -n "$NS" rollout status deployment/"$APP" --timeout=60s || { failure=rollout; return 1; }
+          timeout 90 "$K" -n "$NS" exec -i deploy/"$APP" -c inference -- python - < /tmp/smoke.py || { failure=smoke; return 1; }
         }
 
         if deploy_and_verify; then
-          revision="$("$K" -n "$NS" get deployment "$APP" -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')"
-          echo "FINRISK_EVIDENCE result=deployed image_uri=$FINRISK_IMAGE_URI revision=$revision"
+          revision="$(kq -n "$NS" get deployment "$APP" -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')"
+          ids="image_uri=$FINRISK_IMAGE_URI revision=$revision argocd_revision=$TARGET_REVISION previous_digest=$PREV_DIGEST"
+          # After the release serves, outside the rollback scope: only its evidence would be missing.
+          if ! timeout 240 "$K" -n "$NS" exec -i deploy/"$APP" -c inference -- python - < /tmp/promql.py; then
+            echo "FINRISK_EVIDENCE result=observability_failed $ids"
+            exit 1
+          fi
+          echo "FINRISK_EVIDENCE result=deployed $ids"
         else
-          if rollback; then
-            echo "FINRISK_EVIDENCE result=rolled_back previous_revision=$${PREV_REV:-none}"
+          echo "FINRISK_EVIDENCE failure=$failure digest=$DIGEST state=$${state:-none}"
+          if [ "$PREV_DIGEST" = none ]; then
+            # No earlier digest and no delete right: the failed first deploy stays for diagnosis until DESTROY.
+            echo "FINRISK_EVIDENCE result=first_deploy_retained digest=$DIGEST previous_digest=none"
+          elif [ "$PREV_DIGEST" = "$DIGEST" ]; then
+            echo "FINRISK_EVIDENCE result=failed digest=$DIGEST previous_digest=$PREV_DIGEST"
           else
-            echo "FINRISK_EVIDENCE result=rollback_failed previous_revision=$${PREV_REV:-none}"
+            # Re-patch the digest recorded before the change (rollout undo would be reverted by self-heal).
+            echo "Re-patching $APP to the previous digest $PREV_DIGEST"
+            failure=""
+            if set_digest "$PREV_DIGEST" && wait_for 300 converged "$PREV_DIGEST" && [ -z "$failure" ] \
+                && "$K" -n "$NS" rollout status deployment/"$APP" --timeout=60s; then
+              echo "FINRISK_EVIDENCE result=rolled_back digest=$DIGEST previous_digest=$PREV_DIGEST"
+            else
+              echo "FINRISK_EVIDENCE result=rollback_failed digest=$DIGEST previous_digest=$PREV_DIGEST failure=$${failure:-timeout}"
+            fi
           fi
           exit 1
         fi

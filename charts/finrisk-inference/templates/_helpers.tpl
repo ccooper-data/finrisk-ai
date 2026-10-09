@@ -1,8 +1,7 @@
 {{/*
-Names and the selector are those of infra/k8s/inference.yaml, not derived from the release: the
-deploy build and its smoke test address the Deployment and Service by name, and a Deployment's
-selector cannot change on upgrade. check_inference_chart.py renders under other release names to
-hold this.
+Names and the selector are fixed, not derived from the release: the deploy build and its smoke test
+address the Deployment and Service by name, and a Deployment's selector cannot change on upgrade (V1
+created app: finrisk-inference). check_inference_chart.py renders under other release names to hold this.
 */}}
 {{- define "finrisk-inference.name" -}}
 {{ .Chart.Name }}

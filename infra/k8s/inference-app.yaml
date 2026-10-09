@@ -1,0 +1,63 @@
+# The GitOps target (docs/bounded-aws-validation.md). The bootstrap fills in the PLAN's commit and the
+# image repository (quoted: a commit can be all digits); the deploy group may only read and patch it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: finrisk-digest-writer
+  namespace: finrisk
+rules:
+  - apiGroups: [argoproj.io]
+    resources: [applications]
+    resourceNames: [finrisk-inference]
+    verbs: [get, watch, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: finrisk-digest-writer
+  namespace: finrisk
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: finrisk-digest-writer
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: finrisk-digest-writer
+---
+# No image.digest parameter until the deploy sets one (the chart does not render without it), and no
+# finalizer.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: finrisk-inference
+  namespace: finrisk
+spec:
+  project: finrisk
+  source:
+    repoURL: https://github.com/ccooper-data/finrisk-ai.git
+    targetRevision: "GITOPS_REVISION"
+    path: charts/finrisk-inference
+    helm:
+      releaseName: finrisk-inference
+      valuesObject:
+        image:
+          repository: "IMAGE_REPOSITORY"
+        serviceMonitor:
+          enabled: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: finrisk
+  syncPolicy:
+    automated:
+      enabled: true
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - FailOnSharedResource=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 1m
