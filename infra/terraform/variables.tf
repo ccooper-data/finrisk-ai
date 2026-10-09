@@ -120,3 +120,15 @@ variable "enable_audit_trail" {
   type        = bool
   default     = false
 }
+
+variable "gitops_revision" {
+  description = "Commit Argo CD deploys charts/finrisk-inference from: the PLAN's own commit (provision-bounded-aws.yml passes GITHUB_SHA). Null outside PLAN (DESTROY, the reaper); both builds then refuse to run."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.gitops_revision == null || can(regex("^[0-9a-f]{40}$", var.gitops_revision))
+    error_message = "gitops_revision must be a full 40-character lowercase commit SHA."
+  }
+}

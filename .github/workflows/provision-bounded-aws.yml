@@ -98,6 +98,8 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.plan_run_id }}
 
+      # gitops_revision: Argo CD deploys charts/finrisk-inference from this PLAN's own commit. Only PLAN
+      # passes it; APPLY uses the reviewed binary plan, and DESTROY and the reaper rely on its null default.
       - name: Create bounded validation plan
         if: inputs.action == 'plan'
         env:
@@ -109,9 +111,27 @@ jobs:
             -var="enable_eks=true" \
             -var="enable_nat_gateway=true" \
             -var="enable_observability=true" \
-            -var="enable_audit_trail=true"
+            -var="enable_audit_trail=true" \
+            -var="gitops_revision=$GITHUB_SHA"
           terraform -chdir="$TF_DIR" show -no-color bounded-validation.tfplan > "$TF_DIR/bounded-validation-plan.txt"
           (cd "$TF_DIR" && sha256sum bounded-validation.tfplan > bounded-validation.tfplan.sha256)
+
+      # The cluster-admin bootstrap buildspec must be in the reviewed plan text in full, pinning Argo CD
+      # to this PLAN's commit: the plan's only FINRISK_GITOPS_REVISION line, inside the bootstrap
+      # project's block, equal to GITHUB_SHA, and no buildspec "(known after apply)". Before the binary
+      # plan is stored, so a plan that fails here can never be applied.
+      - name: Verify the plan pins the GitOps revision
+        if: inputs.action == 'plan'
+        run: |
+          plan="$TF_DIR/bounded-validation-plan.txt"
+          bootstrap="$(awk '/^  # aws_codebuild_project\.k8s_bootstrap\[0\] /{on=1; next} /^  # /{on=0} on' "$plan")"
+          markers="$(grep -c 'FINRISK_GITOPS_REVISION=' "$plan" || true)"
+          if [ "$markers" != 1 ] || ! grep -Eqx "[[:space:]]+FINRISK_GITOPS_REVISION=$GITHUB_SHA" <<<"$bootstrap" \
+              || grep -Eq 'buildspec +=.*\(known after apply\)' "$plan"; then
+            echo "::error::The plan's bootstrap buildspec does not pin Argo CD to $GITHUB_SHA in plain text (markers: $markers)"
+            exit 1
+          fi
+          echo "::notice::Bootstrap buildspec pins Argo CD to $GITHUB_SHA"
 
       - name: Store private binary plan in state bucket
         if: inputs.action == 'plan'

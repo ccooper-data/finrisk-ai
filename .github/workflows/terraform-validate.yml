@@ -97,6 +97,8 @@ jobs:
         run: python infra/tests/test_cluster_guards.py
       - name: Cluster add-ons static acceptance
         run: python infra/tests/test_cluster_addons.py
+      - name: GitOps deploy objects acceptance
+        run: python infra/tests/test_gitops_objects.py
       - name: Inference image acceptance
         run: python infra/tests/test_inference_image.py
       - name: Inference chart static acceptance
@@ -108,7 +110,7 @@ jobs:
         env:
           K8S_TOOLS: ${{ runner.temp }}/k8s-tools
         run: bash .github/scripts/install-k8s-tools.sh "$K8S_TOOLS"
-      - name: Inference chart acceptance (lint, kubeconform, Pod Security, manifest parity)
+      - name: Inference chart acceptance (lint, kubeconform, Pod Security, AppProject fit, deploy wiring)
         env:
           K8S_TOOLS: ${{ runner.temp }}/k8s-tools
         run: python infra/tests/check_inference_chart.py
@@ -116,7 +118,7 @@ jobs:
         env:
           K8S_TOOLS: ${{ runner.temp }}/k8s-tools
         run: python infra/tests/check_cluster_guards.py
-      - name: Argo CD install acceptance (render, Pod Security, exposure, RBAC, kubeconform)
+      - name: Argo CD install acceptance (render, Pod Security, exposure, RBAC, kubeconform of the Argo CD objects)
         env:
           K8S_TOOLS: ${{ runner.temp }}/k8s-tools
         run: python infra/tests/check_argocd_install.py

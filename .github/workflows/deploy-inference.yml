@@ -3,11 +3,14 @@ name: Deploy FinRisk Inference
 # Deploys to the private-only EKS API through the in-VPC CodeBuild projects in
 # infra/terraform/deploy_path.tf. The release role can start those two builds and set only
 # FINRISK_IMAGE_URI (a digest-pinned image in this account's repository); it cannot change what
-# they run. Rollout, readiness, smoke test and rollback happen inside the deploy buildspec.
+# they run. The deploy buildspec sets that digest on the Argo CD Application, waits for Argo CD to
+# converge on it, runs the smoke test and records PromQL evidence, and re-patches the previous
+# digest on failure (a failed first deploy is left in place until DESTROY).
 #
 # There is no image input: it deploys the image Build Inference Image pushed for this same
-# commit. The deploy buildspec's expected model SHA-256 was fixed at PLAN time, and main stays
-# frozen from PLAN to DESTROY, so image, pin and plan all come from one commit.
+# commit. The expected model SHA-256 and the commit Argo CD deploys the chart from were fixed at
+# PLAN time, and main stays frozen from PLAN to DESTROY, so image, chart, pin and plan all come
+# from one commit; the step between the builds refuses to deploy if the commits differ.
 on:
   workflow_dispatch:
 
@@ -67,12 +70,24 @@ jobs:
           } > "$EVIDENCE_FILE"
 
       # Fixed build with cluster scope; IAM denies every override for it. Namespaces, the exposure
-      # guard, Argo CD and the lean Prometheus stack (infra/terraform/deploy/bootstrap-buildspec.yml.tftpl).
+      # guard, Argo CD, the lean Prometheus stack and the inference Application at the PLAN's commit
+      # (infra/terraform/deploy/bootstrap-buildspec.yml.tftpl).
       - name: Bootstrap cluster add-ons
         env:
           CODEBUILD_WAIT_MINUTES: "35"
           EVIDENCE_TERMINAL: "bootstrap=complete"
         run: exec .github/scripts/run-codebuild.sh "$BOOTSTRAP_PROJECT"
+
+      # Argo CD renders the chart at the PLAN's commit (the bootstrap's gitops evidence line); the image
+      # is this run's commit. Frozen main makes them one commit; refuse to deploy when they are not.
+      - name: Check the GitOps revision is this commit
+        run: |
+          revisions="$(sed -n "s/^${BOOTSTRAP_PROJECT}: gitops .* target_revision=\([0-9a-f]\{40\}\) .*$/\1/p" "$EVIDENCE_FILE")"
+          if [ "$revisions" != "$GITHUB_SHA" ]; then
+            echo "::error::Argo CD deploys commit '${revisions:-none}', but this run's image is from $GITHUB_SHA; deploy from the commit the reviewed plan was made from"
+            exit 1
+          fi
+          echo "gitops_revision_check=$GITHUB_SHA" >> "$EVIDENCE_FILE"
 
       # Namespace-scoped build; the image URI is the only value the caller supplies.
       - name: Deploy digest-pinned image

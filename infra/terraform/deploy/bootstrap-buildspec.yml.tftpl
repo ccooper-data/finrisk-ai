@@ -1,9 +1,7 @@
 version: 0.2
 
-# Cluster add-ons, as a role holding AmazonEKSClusterAdminPolicy. Fixed by Terraform and reviewed
-# with the plan; the release role's IAM denies every StartBuild override with a condition key (debug
-# sessions cannot connect: no ssmmessages). Idempotent; every wait and download bounded (summed in
-# infra/tests/test_cluster_addons.py); only the last evidence line contains "bootstrap=".
+# Cluster add-ons and the inference Application, as cluster admin; fixed by Terraform, reviewed with
+# the plan. Idempotent; waits bounded; only the last evidence line has "bootstrap=".
 
 env:
   shell: bash
@@ -13,12 +11,14 @@ phases:
     commands:
       - |
         set -euo pipefail
+        # The PLAN's commit (-var gitops_revision), checked in the plan text; refused unless a commit.
+        FINRISK_GITOPS_REVISION=${gitops_revision}
+        [[ "$FINRISK_GITOPS_REVISION" =~ ^[0-9a-f]{40}$ ]] || { echo "gitops revision refused: $FINRISK_GITOPS_REVISION"; exit 1; }
         mkdir -p /opt/finrisk/bin /tmp/finrisk
         A="${argocd_namespace}"
         M="${monitoring_namespace}"
 
-        # Pinned kubectl, helm (CI's version) and Argo CD chart, checked against checksums fixed here.
-        # Transient errors are retried; a download takes at most about a minute.
+        # Pinned downloads, checked against fixed checksums.
         fetch() {
           curl -fsSL --retry 3 --retry-connrefused --retry-max-time 20 --max-time 40 -o "$1" "$2"
           echo "$3  $1" | sha256sum --check --strict
@@ -34,19 +34,19 @@ phases:
         "$K" version --client
         "$H" version
 
-        # The embedded infra/k8s files, each checked against its sha256 in plain text.
+        # The embedded infra/k8s files, each checked against its sha256.
         printf '%s' "${k8s_bundle_b64}" | base64 -d | gunzip | awk '/^#==> /{f="/tmp/finrisk/"$2; next} {print > f}'
         sha256sum --check --strict <<EOF
         ${cluster_guards_sha256}  /tmp/finrisk/cluster-guards.yaml
         ${argocd_values_sha256}  /tmp/finrisk/argocd-values.yaml
         ${argocd_projects_sha256}  /tmp/finrisk/argocd-projects.yaml
         ${monitoring_app_sha256}  /tmp/finrisk/monitoring-app.yaml
+        ${inference_app_sha256}  /tmp/finrisk/inference-app.yaml
         EOF
 
         aws eks update-kubeconfig --name "${cluster_name}" --region "${region}"
 
-        # Polls a check every 5 s until it passes or $1 seconds have passed. Checks call kubectl as kq,
-        # so a hung call holds a wait at most 10 s past its bound.
+        # Polls a check every 5 s for up to $1 s; kq bounds each call.
         wait_for() {
           local deadline=$(( $(date +%s) + $1 ))
           shift
@@ -71,8 +71,7 @@ phases:
         read -r pods cpu memory <<<"$("$K" get nodes -o jsonpath='{.items[0].status.allocatable.pods} {.items[0].status.allocatable.cpu} {.items[0].status.allocatable.memory}')"
         echo "FINRISK_EVIDENCE node count=$(grep -c . <<<"$types") instance_type=${node_instance_type} allocatable_pods=$pods allocatable_cpu=$cpu allocatable_memory=$memory"
 
-        # Pod Security restricted before anything runs; warn set explicitly (it would default to
-        # enforce) because the deploy build's dry run fails on its warning.
+        # Pod Security restricted (enforce and warn) before anything runs.
         for ns in "${namespace}" "$A" "$M"; do
           "$K" create namespace "$ns" --dry-run=client -o yaml | "$K" apply -f -
           "$K" label namespace "$ns" --overwrite \
@@ -82,9 +81,7 @@ phases:
             pod-security.kubernetes.io/warn-version=latest
         done
 
-        # Exposure guard, proven by server-side dry runs: a LoadBalancer Service, an Ingress and a PVC
-        # denied by this policy; externalIPs denied (by it, or first by DenyServiceExternalIPs if EKS
-        # enables that; recorded); a ClusterIP Service admitted.
+        # Exposure guard, proven by server-side dry runs.
         apply cluster-guards.yaml
         probe() {  # <kind> <spec>
           local api=v1
@@ -122,7 +119,7 @@ phases:
         fi
         echo "FINRISK_EVIDENCE guard policy=finrisk-no-external-exposure loadbalancer_dry_run=denied external_ips_dry_run=denied external_ips_denied_by=$external ingress_dry_run=denied pvc_dry_run=denied clusterip_dry_run=admitted"
 
-        digest_pinned() {  # every container and init container image of every Pod in namespace $1
+        digest_pinned() {  # every image of every Pod in namespace $1
           local images
           images="$("$K" -n "$1" get pods -o jsonpath='{range .items[*]}{range .spec.initContainers[*]}{.image}{"\n"}{end}{range .spec.containers[*]}{.image}{"\n"}{end}{end}')"
           if [ -z "$images" ] || grep -Evx '[^@[:space:]]+@sha256:[0-9a-f]{64}' <<<"$images"; then
@@ -131,10 +128,9 @@ phases:
           fi
         }
 
-        # A stopped install leaves the release pending, and Helm refuses every later one: DESTROY.
+        # A stopped install leaves the release pending: DESTROY.
         pending="$("$H" list --namespace "$A" --pending --short)"
         [ -z "$pending" ] || { echo "Helm release $pending is pending from an interrupted bootstrap; DESTROY rather than retry"; exit 1; }
-        # Helm waits up to the timeout for the Redis password hook Job, then again for the workloads.
         "$H" upgrade --install argocd /tmp/finrisk/argo-cd.tgz --namespace "$A" \
           --values /tmp/finrisk/argocd-values.yaml --server-side=true --wait --timeout 150s --history-max 3
         for workload in statefulset/argocd-application-controller deployment/argocd-repo-server deployment/argocd-redis; do
@@ -156,7 +152,7 @@ phases:
         fi
         echo "FINRISK_EVIDENCE argocd chart=argo-cd-${argocd_chart_version} chart_sha256=${argocd_chart_sha256} image=$(get statefulset argocd-application-controller -o jsonpath='{.spec.template.spec.containers[0].image}') server_replicas=0 ingresses=0 non_clusterip_services=0 admin_enabled=false application_namespaces=${namespace} redis_auth=secret images_digest_pinned=yes"
 
-        # Gated on Healthy and a Succeeded sync, not Synced (CRD defaulting can show as OutOfSync).
+        # Not gated on Synced: CRD defaulting can show OutOfSync.
         "$K" wait --for=condition=Established --timeout=30s crd/applications.argoproj.io crd/appprojects.argoproj.io
         apply argocd-projects.yaml
         apply monitoring-app.yaml
@@ -176,14 +172,14 @@ phases:
           exit 1
         fi
 
-        # The generated Prometheus must not serve the lifecycle API (POST /-/quit, /-/reload).
+        # The generated Prometheus must not serve the lifecycle API.
         digest_pinned "$M"
         args="$("$K" -n "$M" get statefulset prometheus-monitoring -o jsonpath='{.spec.template.spec.containers[*].args}')"
         if [ -z "$args" ] || grep -qF -- "--web.enable-lifecycle" <<<"$args"; then
           echo "prometheus-monitoring has the lifecycle API enabled, or no args: $args"
           exit 1
         fi
-        # kube-state-metrics scraped (the deploy's PromQL needs it), via the API server proxy.
+        # kube-state-metrics scraped (the deploy's PromQL needs it).
         scraping() {
           query="$(kq get --raw "/api/v1/namespaces/$M/services/monitoring-prometheus:9090/proxy/api/v1/query?query=up")" || return 1
           read -r series up ksm <<<"$(python3 -c 'import json, sys
@@ -198,5 +194,14 @@ phases:
         oom="$(repo lastState.terminated.reason)"
         echo "FINRISK_EVIDENCE monitoring app=finrisk-monitoring health=$health operation=$phase sync=$sync oci_target=$(app '{.spec.source.targetRevision}') synced_revision=$(app '{.status.operationState.syncResult.revision}') images_digest_pinned=yes reload=ProcessSignal lifecycle_api=off prometheus_up_series=$series prometheus_up_ok=$up repo_server_restarts=$${restarts:-unknown} repo_server_last_termination=$${oom:-none}"
         "$K" top pods --all-namespaces || echo "kubectl top unavailable (metrics-server not serving yet)"
+
+        # The digest writer's Role and the Application at the PLAN's commit; no digest yet, so nothing deploys.
+        R=${image_repository}
+        sed -e "s#GITOPS_REVISION#$FINRISK_GITOPS_REVISION#" -e "s#IMAGE_REPOSITORY#$R#" /tmp/finrisk/inference-app.yaml > /tmp/finrisk/gitops.yaml
+        apply gitops.yaml
+        read -r project target repository conditions <<<"$(kq -n "${namespace}" get applications.argoproj.io finrisk-inference -o jsonpath='{.spec.project} {.spec.source.targetRevision} {.spec.source.helm.valuesObject.image.repository} {.status.conditions[*].type}')"
+        [ "$project $target $repository" = "finrisk $FINRISK_GITOPS_REVISION $R" ] || { echo "finrisk-inference is not the reviewed Application"; exit 1; }
+        conditions="$${conditions// /,}"
+        echo "FINRISK_EVIDENCE gitops app=${namespace}/finrisk-inference project=$project target_revision=$target image_repository=$repository conditions=$${conditions:-none}"
 
         echo "FINRISK_EVIDENCE bootstrap=complete namespace=${namespace}"

@@ -14,7 +14,9 @@ dockerfile = (ROOT / "Dockerfile").read_text()
 dockerignore = (ROOT / ".dockerignore").read_text().splitlines()
 constraints = (ROOT / "constraints/serving.txt").read_text()
 build = (ROOT / ".github/workflows/build-inference-image.yml").read_text()
-manifest = (ROOT / "infra/k8s/inference.yaml").read_text()
+# The chart's Deployment, the only deploy artifact. Its template lines are dropped, so the rest loads as
+# plain YAML; check_inference_chart.py checks the real render.
+manifest = (ROOT / "charts/finrisk-inference/templates/deployment.yaml").read_text()
 trainer = ast.parse((ROOT / "src/finrisk/modeling/boosted_tree.py").read_text())
 # The training pins, then the libraries behind GET /metrics under their own header.
 training_pins, telemetry_header, telemetry_pins = constraints.partition("\n# Telemetry stack")
@@ -32,7 +34,8 @@ validate_steps = validate_job["steps"]
 validate_runs = [s.get("run", "") for s in validate_steps]
 model_path = re.search(r"FINRISK_MODEL_PATH=(\S+)", dockerfile).group(1)
 # The boot step runs with the pod's memory limit; Kubernetes Mi/Gi and docker m/g are both binary units.
-pod_limit = next(c["resources"]["limits"]["memory"] for d in yaml.safe_load_all(manifest)
+pod_limit = next(c["resources"]["limits"]["memory"] for d in yaml.safe_load_all("\n".join(
+                     line for line in manifest.splitlines() if "{{" not in line))
                  if d and d.get("kind") == "Deployment" for c in d["spec"]["template"]["spec"]["containers"]
                  if c["name"] == "inference")
 docker_memory = re.sub(r"^(\d+)([KMG])i$", lambda m: m.group(1) + m.group(2).lower(), pod_limit)

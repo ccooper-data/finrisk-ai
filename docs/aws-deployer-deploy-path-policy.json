@@ -83,8 +83,10 @@
         "StringEquals": {
           "eks:accessEntryType": "STANDARD"
         },
+        "ForAllValues:StringEquals": {
+          "eks:kubernetesGroups": "finrisk-digest-writer"
+        },
         "Null": {
-          "eks:kubernetesGroups": "true",
           "eks:username": "true"
         }
       }
