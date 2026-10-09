@@ -9,8 +9,7 @@ spec:
   selector:
     {{- include "finrisk-inference.selectorLabels" . | nindent 4 }}
   ports:
-    # Named for the ServiceMonitor. The target stays a number: a rollout undo restores only the
-    # Deployment, and an older Pod template need not name its port.
+    # Named for the ServiceMonitor. The target is the container port by number (check_inference_chart.py).
     - name: http
       port: 80
       targetPort: 8000

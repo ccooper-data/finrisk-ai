@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 # Renders charts/finrisk-inference with the pinned helm and checks the output: helm lint --strict,
 # kubeconform -strict against the cluster's Kubernetes schemas and the pinned ServiceMonitor CRD, Pod
-# Security restricted (pod_security.py), and parity with infra/k8s/inference.yaml, which the deploy
-# build still applies. It needs the tools .github/scripts/install-k8s-tools.sh installs into
-# $K8S_TOOLS, so it is not named test_*.py (pytest would collect it, and ci.yml installs no helm);
-# terraform-validate.yml runs it after the install. A missing or different tool fails: nothing skips.
+# Security restricted (pod_security.py), the finrisk AppProject's limits (Argo CD syncs it with the
+# ServiceMonitor on), and the wiring the deploy build relies on (the smoke test's Service address, the
+# port the image listens on, the container it execs into). The chart is the only deploy artifact. It
+# needs the tools .github/scripts/install-k8s-tools.sh installs into $K8S_TOOLS, so it is not named
+# test_*.py (pytest would collect it, and ci.yml installs no helm); terraform-validate.yml runs it after
+# the install. A missing or different tool fails: nothing skips.
 import copy
 import json
 import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -19,7 +22,12 @@ from pod_security import restricted
 ROOT = Path(__file__).resolve().parents[2]
 CHART = ROOT / "charts/finrisk-inference"
 INSTALL = (ROOT / ".github/scripts/install-k8s-tools.sh").read_text()
-MANIFEST = (ROOT / "infra/k8s/inference.yaml").read_text()
+APPLICATION = next(d for d in yaml.safe_load_all((ROOT / "infra/k8s/inference-app.yaml").read_text()) if d and d["kind"] == "Application")
+PROJECT = next(d for d in yaml.safe_load_all((ROOT / "infra/k8s/argocd-projects.yaml").read_text())
+               if d and d["metadata"]["name"] == APPLICATION["spec"]["project"])
+DEPLOY = (ROOT / "infra/terraform/deploy/deploy-buildspec.yml.tftpl").read_text()
+PATH_TF = (ROOT / "infra/terraform/deploy_path.tf").read_text()
+LISTEN_PORT = int(re.search(r'"--port", "(\d+)"', (ROOT / "Dockerfile").read_text())[1])
 CLUSTER = re.search(r'variable "eks_cluster_version" \{[^}]*default\s*=\s*"([0-9.]+)"',
                     (ROOT / "infra/terraform/variables.tf").read_text())[1]
 TOOLS = Path(os.environ.get("K8S_TOOLS") or "/nonexistent")
@@ -39,13 +47,16 @@ REPOSITORY, DIGEST = "780976819607.dkr.ecr.us-east-1.amazonaws.com/finrisk-ai-in
 IMAGE = f"{REPOSITORY}@{DIGEST}"
 VALUES = ["--set", f"image.repository={REPOSITORY}", "--set", f"image.digest={DIGEST}"]
 MONITORED = [*VALUES, "--set", "serviceMonitor.enabled=true"]
-# Release names other than the chart's (Argo CD names the release), so a name or selector that followed
-# the release would show as drift instead of happening to match the manifest.
+# Release names other than the chart's, so a name or selector that followed the release would show.
 RELEASE, OTHER_RELEASE = "finrisk-app", "other-app"
-# The only allowed differences from the manifest: these labels on each object's own metadata (never a
-# selector or the Pod template), and the image, which the deploy build substitutes for the placeholder.
+# The only labels another release name may change: each object's own metadata, never a selector or the Pod template.
 CHART_LABELS = {"helm.sh/chart", "app.kubernetes.io/name", "app.kubernetes.io/instance",
                 "app.kubernetes.io/version", "app.kubernetes.io/managed-by"}
+# The deploy build's names: the Deployment and Service it addresses, the container it execs into, and the
+# smoke test's Service address (http://<app>.<namespace>.svc.cluster.local, port 80).
+APP = re.search(r'k8s_app_name\s+= "([^"]+)"', PATH_TF)[1]
+CLUSTER_SCOPED = {"Namespace", "ClusterRole", "ClusterRoleBinding", "CustomResourceDefinition", "PersistentVolume",
+                  "StorageClass", "PriorityClass", "ValidatingWebhookConfiguration", "MutatingWebhookConfiguration"}
 logs = []
 
 
@@ -94,24 +105,59 @@ def container(template):
     return template["spec"]["containers"][0]
 
 
+def fits_project(docs):
+    """Argo CD's AppProject rule for the finrisk project: namespaced kinds by group and kind, into its
+    destination; it whitelists nothing cluster-scoped."""
+    spec = PROJECT["spec"]
+    return bool(docs) and spec["clusterResourceWhitelist"] == [] and all(
+        d["kind"] not in CLUSTER_SCOPED and {"group": d["apiVersion"].rpartition("/")[0], "kind": d["kind"]}
+        in spec["namespaceResourceWhitelist"] and {"server": "https://kubernetes.default.svc", "namespace": d["metadata"]["namespace"]}
+        in spec["destinations"] for d in docs)
+
+
+def wired(docs):
+    """The smoke test reaches the image through Service <app> port 80, which targets the port the image
+    listens on, and the deploy execs into container "inference"; the HPA alone sets the replica count."""
+    by = by_name(docs)
+    deployment, service = by.get(("Deployment", APP)), by.get(("Service", APP))
+    if not deployment or not service:
+        return False
+    template, selector = deployment["spec"]["template"], service["spec"].get("selector") or {}
+    containers = template["spec"]["containers"]
+    return 'BASE = "http://${app}.${namespace}.svc.cluster.local"' in DEPLOY and "-c inference -- python -" in DEPLOY \
+        and [c["name"] for c in containers] == ["inference"] \
+        and [p["containerPort"] for c in containers for p in c.get("ports", [])] == [LISTEN_PORT] \
+        and [(p["port"], p.get("targetPort")) for p in service["spec"]["ports"]] == [(80, LISTEN_PORT)] \
+        and bool(selector) and selector.items() <= template["metadata"]["labels"].items() \
+        and "replicas" not in deployment["spec"]
+
+
+def changed(docs, change):
+    docs = copy.deepcopy(docs)
+    change(by_name(docs))
+    return docs
+
+
+# As Argo CD renders the Application: its valuesObject (the bootstrap's repository in place of the
+# placeholder) as a values file, and the deploy's image.digest parameter as --set-string.
+with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as values_file:
+    yaml.safe_dump(json.loads(json.dumps(APPLICATION["spec"]["source"]["helm"]["valuesObject"]).replace(
+        '"IMAGE_REPOSITORY"', json.dumps(REPOSITORY))), values_file)
+try:
+    _, as_argocd = render("--values", values_file.name, "--set-string", f"image.digest={DIGEST}",
+                          release=APPLICATION["spec"]["source"]["helm"]["releaseName"])
+    before_first_digest = refused("--values", values_file.name)
+finally:
+    os.unlink(values_file.name)
 text, chart = render(*VALUES)
 monitored_text, monitored = render(*MONITORED)
 _, elsewhere = render(*VALUES, namespace="finrisk-elsewhere")
 _, renamed = render(*VALUES, release=OTHER_RELEASE)
-# The manifest as the deploy build applies it, with the image in place of the placeholder.
-deployed = by_name(d for d in yaml.safe_load_all(MANIFEST.replace("FINRISK_IMAGE_PLACEHOLDER", IMAGE)) if d)
 objects, with_monitor = by_name(chart), by_name(monitored)
 service = objects.get(("Service", "finrisk-inference"), {"metadata": {}, "spec": {}})
 monitor = with_monitor.get(("ServiceMonitor", "finrisk-inference"), {"metadata": {}, "spec": {}})
 templates = [d["spec"]["template"] for d in chart if "template" in (d.get("spec") or {})]
 results = [restricted(t) for t in templates]
-
-
-def drift(change):
-    """Whether the parity check sees one change to the chart's Pod template."""
-    docs = copy.deepcopy(chart)
-    change(next(d for d in docs if d["kind"] == "Deployment")["spec"]["template"])
-    return comparable(docs) != deployed
 
 
 checks = {
@@ -120,14 +166,14 @@ checks = {
     "schemas are the cluster's Kubernetes minor (variables.tf)": KUBERNETES_VERSION.startswith(CLUSTER + "."),
     "helm lint --strict": run(HELM, "lint", "--strict", CHART, *VALUES).returncode == 0,
     "helm lint --strict with the ServiceMonitor": run(HELM, "lint", "--strict", CHART, *MONITORED).returncode == 0,
-    "renders the manifest's Deployment, Service and HPA by default": len(objects) == len(chart)
-        and sorted(objects) == sorted(deployed),
+    "renders the Deployment, Service and HPA by default": len(objects) == len(chart) and sorted(objects)
+        == [("Deployment", APP), ("HorizontalPodAutoscaler", APP), ("Service", APP)],
     "the ServiceMonitor adds itself and changes nothing else": bool(objects)
         and with_monitor == {**objects, ("ServiceMonitor", "finrisk-inference"): monitor},
     "no Namespace; every object in the release namespace": bool(elsewhere)
         and all(d["kind"] != "Namespace" and d["metadata"]["namespace"] == "finrisk-elsewhere" for d in elsewhere),
     "another release name changes nothing but the allowed labels": bool(renamed) and comparable(renamed) == comparable(chart),
-    "Deployment selector is the manifest's app: finrisk-inference (immutable)":
+    "Deployment selector is app: finrisk-inference (immutable)":
         [d["spec"]["selector"] for d in chart if d["kind"] == "Deployment"] == [{"matchLabels": {"app": "finrisk-inference"}}],
     f"kubeconform -strict, Kubernetes {KUBERNETES_VERSION}": kubeconform(text, len(chart)),
     "kubeconform -strict with the ServiceMonitor (pinned CRD schema)": kubeconform(monitored_text, len(monitored)),
@@ -155,13 +201,23 @@ checks = {
         and set(monitor["spec"].get("selector", {})) == {"matchLabels"}
         and bool(monitor["spec"]["selector"]["matchLabels"])
         and monitor["spec"]["selector"]["matchLabels"].items() <= service["metadata"].get("labels", {}).items(),
-    "same objects as infra/k8s/inference.yaml, apart from the allowed labels": bool(chart)
-        and comparable(chart) == deployed,
-    # Not vacuous: a change outside the allowed differences shows.
-    "parity sees a probe, resource or Pod template label change": bool(chart)
-        and drift(lambda t: container(t)["readinessProbe"].update(periodSeconds=11))
-        and drift(lambda t: container(t)["resources"]["limits"].update(memory="1Gi"))
-        and drift(lambda t: t["metadata"]["labels"].update({"app.kubernetes.io/name": "finrisk-inference"})),
+    "as Argo CD renders the Application with the deploy's digest: the ServiceMonitor render": bool(as_argocd)
+        and by_name(as_argocd) == by_name(render(*MONITORED, release=APPLICATION["spec"]["source"]["helm"]["releaseName"])[1]),
+    "before the first digest the Application's values do not render (nothing to deploy)": before_first_digest,
+    # Argo CD syncs the chart with the ServiceMonitor on, under the finrisk AppProject.
+    "with the ServiceMonitor, every object fits the finrisk AppProject (its kinds, into finrisk)": fits_project(monitored),
+    "negative control: a kind outside the project (a ConfigMap) is caught": not fits_project(
+        monitored + [{"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "x", "namespace": "finrisk"}}]),
+    "negative control: another namespace is caught": not fits_project(
+        changed(monitored, lambda b: b[("Service", APP)]["metadata"].update(namespace="default"))),
+    "the deploy build's wiring: Service port 80 to the image's port, container inference, no replicas": wired(chart),
+    **{f"negative control: {name} is caught": not wired(changed(chart, change)) for name, change in {
+        "a renamed container": lambda b: container(b[("Deployment", APP)]["spec"]["template"]).update(name="app"),
+        "another Service port": lambda b: b[("Service", APP)]["spec"]["ports"][0].update(port=8080),
+        "a targetPort the image does not listen on": lambda b: b[("Service", APP)]["spec"]["ports"][0].update(targetPort=8001),
+        "a fixed replica count": lambda b: b[("Deployment", APP)]["spec"].update(replicas=2),
+        "a selector that misses the Pods": lambda b: b[("Service", APP)]["spec"].update(selector={"app": "other"}),
+    }.items()},
 }
 
 failed = [k for k, v in checks.items() if not v]

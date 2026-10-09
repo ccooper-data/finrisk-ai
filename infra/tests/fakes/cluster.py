@@ -4,8 +4,10 @@
 Invoked as `cluster.py kubectl ARGS` or `cluster.py helm ARGS`. Models what the bootstrap depends on:
 namespaces and their labels, the exposure guard (a server-side dry run is admitted until the applied
 policy loads, then judged by it), the Argo CD install and its settings, the Pods' images, the
-monitoring Application's progress, the generated Prometheus StatefulSet and a Prometheus `up` query
-through the API server proxy. Applies that need CRDs fail before helm has installed Argo CD. The calls
+monitoring Application's progress, the generated Prometheus StatefulSet, a Prometheus `up` query
+through the API server proxy, and the inference Application read back as applied. Applies that need
+CRDs fail before helm has installed Argo CD, and the inference Application fails before its AppProject
+exists. The calls
 a wait polls with must carry a request timeout (the buildspec's kq). Any kubectl or helm call it does
 not model fails, so a new call in the buildspec cannot pass unnoticed. With FAKE_LOG set, every call
 is also appended there, so a test can order them against the other stubs.
@@ -32,6 +34,7 @@ Scenario knobs (environment):
   FAKE_NO_KSM=1              kube-state-metrics is not up in Prometheus
   FAKE_REPO_OOM=1            the repo-server restarted once after an OOM kill
   FAKE_NO_TOP=1              kubectl top fails (metrics-server not serving)
+  FAKE_GITOPS_DRIFT=1        the inference Application reads back with another targetRevision
 """
 import fcntl
 import json
@@ -47,7 +50,7 @@ LOCK = open(STATE + ".lock", "w")
 fcntl.flock(LOCK, fcntl.LOCK_EX)
 state = json.load(open(STATE)) if os.path.exists(STATE) else {
     "calls": [], "namespaces": {}, "applied": [], "guard": False, "rounds": 0, "auth": 0, "argocd": False,
-    "polls": 0, "crd": 0, "target": None}
+    "polls": 0, "crd": 0, "target": None, "gitops": None}
 tool, args = sys.argv[1], sys.argv[2:]
 state["calls"].append(" ".join([tool, *args]))
 env = os.environ.get
@@ -154,12 +157,17 @@ if verb == "apply" and "--server-side" in flags and len(files) == 1:
     text = open(files[0]).read()
     if name != "cluster-guards.yaml" and not state["argocd"]:
         done(1, err="error: resource mapping not found: no matches for kind in version argoproj.io/v1alpha1\n")
+    if name == "gitops.yaml" and "argocd-projects.yaml" not in state["applied"]:
+        done(1, err='Error from server: applications.argoproj.io "finrisk-inference": project finrisk not found\n')
     state["applied"].append(name)
     if name == "cluster-guards.yaml":
         state["guard"] = True
     target = re.search(r"^    targetRevision: (\S+)$", text, re.M)
-    if target:
+    if name == "monitoring-app.yaml":
         state["target"] = target[1]
+    if name == "gitops.yaml":
+        state["gitops"] = {"text": text, "project": re.search(r"^  project: (\S+)$", text, re.M)[1], "target": target[1].strip('"'),
+                           "repository": re.search(r"^          repository: (\S+)$", text, re.M)[1].strip('"')}
     done(out=f"{name} serverside-applied\n")
 if positional == ["create"] and "--dry-run=server" in flags and files == ["-"]:
     if namespace not in state["namespaces"]:
@@ -226,6 +234,12 @@ if positional == ["get", "applications.argoproj.io", "finrisk-monitoring"] and "
         done(out='[{"type":"SyncError","message":"one or more objects failed to apply"}]\nretrying\n')
     if output in ("jsonpath={.spec.source.targetRevision}", "jsonpath={.status.operationState.syncResult.revision}"):
         done(out=state["target"])
+if positional == ["get", "applications.argoproj.io", "finrisk-inference"] and namespace == "finrisk" and state["gitops"]:
+    app = state["gitops"]
+    if output == ("jsonpath={.spec.project} {.spec.source.targetRevision} {.spec.source.helm.valuesObject.image.repository} "
+                  "{.status.conditions[*].type}"):
+        target = "f" * 40 if env("FAKE_GITOPS_DRIFT") else app["target"]
+        done(out=f'{app["project"]} {target} {app["repository"]} ComparisonError')
 if positional == ["get", "crd", "servicemonitors.monitoring.coreos.com"]:
     # Argo CD applies the chart's CRDs first; one poll after the Application is applied, it is established.
     if "monitoring-app.yaml" in state["applied"]:

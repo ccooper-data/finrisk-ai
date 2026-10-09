@@ -40,12 +40,18 @@ checks = {
     "demo preserves evidence language": "implemented and CI-validated" in demo
         and "Do not say those behaviors were live-tested in AWS" in demo,
     "runbook requires teardown": "successful teardown is part of the portfolio evidence" in runbook,
-    # Deploy runs as the release role and recovers to a recorded revision, not a captured image.
+    # Deploy runs as the release role. A non-first failure returns to the digest recorded before the
+    # patch (never rollout undo, which Argo CD's self-heal reverts); a failed first deploy is retained for
+    # diagnosis, never described as a rollback.
     "runbook names the release environment": "portfolio-release" in runbook
         and "portfolio-validation" not in runbook,
-    "recovery is to the recorded revision": "--to-revision" in runbook
+    "recovery is a re-patch of the recorded digest, never rollout undo": "re-patches that digest" in runbook
+        and "never runs `kubectl rollout undo`" in runbook and "--to-revision" not in runbook + demo
         and not any(stale in doc.lower() for doc in (runbook, demo)
                     for stale in ("previous image", "deployed image", "image captured")),
+    "a failed first deploy is retained, not called a rollback or recovery": "result=first_deploy_retained" in runbook
+        and "This is not a rollback; do not describe it as one or as a recovery." in runbook
+        and "left in place for diagnosis" in demo and "delete a failed first deploy" not in demo,
     "manager/director narrative exists": "manager/director narrative" in demo,
     "cost constraint appears in demo": "$100" in demo,
 }
