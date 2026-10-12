@@ -71,9 +71,9 @@ variable "eks_cluster_version" {
 }
 
 variable "eks_node_instance_types" {
-  description = "Worker type for bounded portfolio validation: one t3.large holds kube-system, Argo CD, Prometheus and the inference pods at HPA max (infra/tests/check_capacity_budget.py). m7i-flex.large, the same size, is the only budgeted alternative."
+  description = "Worker type for bounded portfolio validation: one m7i-flex.large holds kube-system, Argo CD, Prometheus and the inference pods at HPA max (infra/tests/check_capacity_budget.py). The account is limited to Free Tier instance types, which rejected t3.large at node launch on 2026-10-12; t3.large stays budgeted for a Paid-plan account."
   type        = list(string)
-  default     = ["t3.large"]
+  default     = ["m7i-flex.large"]
 
   validation {
     condition     = length(var.eks_node_instance_types) == 1 && alltrue([for t in var.eks_node_instance_types : contains(["t3.large", "m7i-flex.large"], t)])

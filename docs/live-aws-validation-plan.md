@@ -6,7 +6,7 @@ This is a separate empirical-validation milestone after the eight implementation
 - Confirm current AWS spend leaves sufficient headroom below the $100 project ceiling.
 - Confirm AWS Budget exists at or below $100. The stack creates its own budget at APPLY and deletes it at DESTROY, so a standing account-level budget outside the stack is the control that survives a stalled teardown.
 - Use a dedicated Terraform workspace/state for the validation window.
-- EKS desired workers = 1, maximum = 2. Worker type `t3.large` (the PR 2a default; the account is on the Paid plan, which the operator confirmed on 2026-10-07).
+- EKS desired workers = 1, maximum = 2. Worker type `m7i-flex.large`. The account is limited to Free Tier instance types: the first rehearsal APPLY (run 38317490840, 2026-10-12) failed at node launch with "The specified instance type is not eligible for Free Tier" for `t3.large`, and was destroyed (run 38323572764). `m7i-flex.large` is Free Tier eligible and offered in `use1-az1` and `use1-az2` (checked 2026-10-12).
 - NAT, observability, and CloudTrail may be enabled only when required by the active test.
 - Record start timestamp and Git SHA.
 
@@ -84,14 +84,14 @@ This optional practice window was approved for about $1. It runs PLAN, APPLY, Bu
 **Before APPLY**
 - PLAN from the PR 2a merge commit. In the plan text, check two things:
   - The bootstrap buildspec appears in full, with the four `/tmp/finrisk/<file>` sha256 lines. It must never show as `(known after apply)`.
-  - `instance_types = ["t3.large"]`.
+  - `instance_types = ["m7i-flex.large"]`.
 - Record the start time and the Git SHA.
 
 **Objectives and the evidence that proves each**
 
 | # | Objective | Evidence to save | Passes when |
 |---|---|---|---|
-| 1 | The node fits the add-ons | bootstrap `node` line; `kubectl top` table in the bootstrap log | `instance_type=t3.large`, `allocatable_pods=35` |
+| 1 | The node fits the add-ons | bootstrap `node` line; `kubectl top` table in the bootstrap log | `instance_type=m7i-flex.large`, `allocatable_pods=29` |
 | 2 | The exposure guard works live | bootstrap `guard` line | LoadBalancer, externalIPs, Ingress and PVC `denied`, ClusterIP `admitted` |
 | 3 | Argo CD installs from the pinned chart | bootstrap `argocd` line | as listed above, `images_digest_pinned=yes` |
 | 4 | Argo CD syncs Prometheus from the OCI digest, and the Prometheus Pod is admitted under Pod Security `restricted` | bootstrap `monitoring` line | `health=Healthy operation=Succeeded lifecycle_api=off`, `prometheus_up_ok` at least 3; note whether `synced_revision` equals `oci_target` (PR 2b relies on that format) |

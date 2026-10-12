@@ -42,7 +42,7 @@ checks = {
         and psa_labels == {"enforce": ["restricted"], "enforce-version": ["latest"],
                            "warn": ["restricted"], "warn-version": ["latest"]},
     "worker type sized for the add-ons, validated to the budgeted types":
-        'default     = ["t3.large"]' in variables and 'contains(["t3.large", "m7i-flex.large"], t)' in variables,
+        'default     = ["m7i-flex.large"]' in variables and 'contains(["t3.large", "m7i-flex.large"], t)' in variables,
 }
 
 failed = [name for name, ok in checks.items() if not ok]
