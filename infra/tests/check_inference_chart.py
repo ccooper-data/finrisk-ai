@@ -3,10 +3,11 @@
 # kubeconform -strict against the cluster's Kubernetes schemas and the pinned ServiceMonitor CRD, Pod
 # Security restricted (pod_security.py), the finrisk AppProject's limits (Argo CD syncs it with the
 # ServiceMonitor on), and the wiring the deploy build relies on (the smoke test's Service address, the
-# port the image listens on, the container it execs into). The chart is the only deploy artifact. It
-# needs the tools .github/scripts/install-k8s-tools.sh installs into $K8S_TOOLS, so it is not named
-# test_*.py (pytest would collect it, and ci.yml installs no helm); terraform-validate.yml runs it after
-# the install. A missing or different tool fails: nothing skips.
+# port the image listens on, the container it execs into, the images it requires, the objects whose
+# OutOfSync it tolerates). The chart is the only deploy artifact. It needs the tools
+# .github/scripts/install-k8s-tools.sh installs into $K8S_TOOLS, so it is not named test_*.py (pytest would
+# collect it, and ci.yml installs no helm); terraform-validate.yml runs it after the install. A missing or
+# different tool fails: nothing skips.
 import copy
 import json
 import os
@@ -132,6 +133,29 @@ def wired(docs):
         and "replicas" not in deployment["spec"]
 
 
+def images(docs):
+    """The Deployment's Pod template images, init containers included, as the deploy build joins them."""
+    return [c.get("image") for d in docs if d["kind"] == "Deployment" for k in ("initContainers", "containers")
+            for c in d["spec"]["template"]["spec"].get(k) or []]
+
+
+def identity(doc):
+    """group/kind/namespace/name, as the deploy build names an object Argo CD lists."""
+    meta = doc["metadata"]
+    return "/".join((doc["apiVersion"].rpartition("/")[0], doc["kind"], meta.get("namespace", ""), meta["name"]))
+
+
+def tolerated(docs, deploy=DEPLOY):
+    """The objects whose OutOfSync the deploy build tolerates (its `chart` set) are objects Argo CD renders
+    from the Application, by group, kind, namespace and name, and never the Deployment or the Service the
+    smoke test goes through."""
+    match = re.search(r'^        chart = \{("[^"]+"(?:, "[^"]+")*)\}$', deploy, re.M)
+    named = {n.replace("${namespace}", APPLICATION["spec"]["destination"]["namespace"]).replace("${app}", APP)
+             for n in re.findall(r'"([^"]+)"', match[1])} if match else set()
+    return bool(named) and named <= {identity(d) for d in docs} and not any(
+        n.split("/")[1] in ("Deployment", "Service") for n in named)
+
+
 def changed(docs, change):
     docs = copy.deepcopy(docs)
     change(by_name(docs))
@@ -204,6 +228,21 @@ checks = {
     "as Argo CD renders the Application with the deploy's digest: the ServiceMonitor render": bool(as_argocd)
         and by_name(as_argocd) == by_name(render(*MONITORED, release=APPLICATION["spec"]["source"]["helm"]["releaseName"])[1]),
     "before the first digest the Application's values do not render (nothing to deploy)": before_first_digest,
+    "the deploy build tolerates OutOfSync only on objects Argo CD renders from the Application, not the Deployment or Service":
+        tolerated(as_argocd),
+    **{f"negative control: tolerating {name} is caught": not tolerated(as_argocd, DEPLOY.replace(old, new, 1)) and old in DEPLOY
+       for name, (old, new) in {
+        "a name the Application does not render": ('ServiceMonitor/${namespace}/${app}"', 'ServiceMonitor/${namespace}/other"'),
+        "another API group": ('"monitoring.coreos.com/ServiceMonitor/', '"example.com/ServiceMonitor/'),
+        "another namespace": ('HorizontalPodAutoscaler/${namespace}/', 'HorizontalPodAutoscaler/default/'),
+        "the Service": ("        chart = {", '        chart = {"/Service/${namespace}/${app}", '),
+        "the Deployment": ("        chart = {", '        chart = {"apps/Deployment/${namespace}/${app}", '),
+    }.items()},
+    # The deploy build requires the template's images, joined, to be exactly repository@digest.
+    "the Deployment Argo CD renders runs only the deploy's image (no other container or init container)":
+        images(as_argocd) == [IMAGE],
+    "negative control: an init container, even of the same image, is caught": images(changed(as_argocd, lambda b: b[
+        ("Deployment", APP)]["spec"]["template"]["spec"].update(initContainers=[{"name": "setup", "image": IMAGE}]))) != [IMAGE],
     # Argo CD syncs the chart with the ServiceMonitor on, under the finrisk AppProject.
     "with the ServiceMonitor, every object fits the finrisk AppProject (its kinds, into finrisk)": fits_project(monitored),
     "negative control: a kind outside the project (a ConfigMap) is caught": not fits_project(

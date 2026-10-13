@@ -63,6 +63,8 @@ phases:
         }
         expect patch_app yes patch "applications.argoproj.io/$APP" -n "$NS"
         expect get_app yes get "applications.argoproj.io/$APP" -n "$NS"
+        expect get_deployment yes get "deployment/$APP" -n "$NS"
+        expect get_hpa yes get "hpa/$APP" -n "$NS"
         expect patch_other_app no patch applications.argoproj.io/finrisk-other -n "$NS"
         expect create_app no create applications.argoproj.io -n "$NS"
         expect delete_app no delete "applications.argoproj.io/$APP" -n "$NS"
@@ -118,19 +120,25 @@ phases:
         # Argo CD v3.5.3's autoSync copies spec.source into its operation; another source is an override.
         override = [k for k in ("sources", "manifests") if dig(started, "sync", k)]
         override += ["source"] if dig(started, "sync", "source") not in (None, spec.get("source")) else []
-        image = next((c.get("image") for c in dig(dep, "spec", "template", "spec", "containers") or [] if c.get("name") == "inference"), "none")
+        # Every image in the pod template.
+        image = ",".join(c.get("image") or "none" for k in ("initContainers", "containers") for c in dig(dep, "spec", "template", "spec", k) or []) or "none"
         progress = [c.get("reason") for c in dig(dep, "status", "conditions") or [] if c.get("type") == "Progressing"]
         conditions = [c.get("type") for c in status.get("conditions") or []]
-        f = {"sync": sync.get("status"), "revision": sync.get("revision"), "compared": digest(dig(sync, "comparedTo", "source")),
-             "operation": op.get("phase"), "synced": digest(dig(op, "syncResult", "source")),
+        # Objects Argo CD lists as not Synced (group/kind/namespace/name), missing ones included.
+        oos = ["/".join(r.get(k) or "" for k in ("group", "kind", "namespace", "name")) for r in status.get("resources") or [] if r.get("status") != "Synced"]
+        rs = [dig(dep, "status", k) or 0 for k in ("replicas", "updatedReplicas", "availableReplicas")]
+        f = {"sync": sync.get("status"), "out_of_sync": ",".join(oos) or "none", "revision": sync.get("revision"),
+             "compared": digest(dig(sync, "comparedTo", "source")), "operation": op.get("phase"), "synced": digest(dig(op, "syncResult", "source")),
              "synced_revision": dig(op, "syncResult", "revision"), "health": dig(status, "health", "status"),
              "automated": dig(started, "initiatedBy", "automated") is True, "overrides": ",".join(override) or "none",
-             "image": image, "ready": dig(dep, "status", "readyReplicas") or 0, "conditions": ",".join(conditions) or "none",
-             "images": ",".join(dig(status, "summary", "images") or []) or "none"}
+             "image": image, "ready": dig(dep, "status", "readyReplicas") or 0, "replicas": "%d/%d/%d" % tuple(rs),
+             "conditions": ",".join(conditions) or "none", "images": ",".join(dig(status, "summary", "images") or []) or "none"}
         # The Deployment's status is for its current template, not the previous image's.
         observed = (dig(dep, "status", "observedGeneration") or 0) >= (dig(dep, "metadata", "generation") or 1)
+        # Argo CD can report OutOfSync after a successful sync: tolerated only on these two, whose drift cannot change what serves.
+        chart = {"autoscaling/HorizontalPodAutoscaler/${namespace}/${app}", "monitoring.coreos.com/ServiceMonitor/${namespace}/${app}"}
         ok = {
-            "sync": f["sync"] == "Synced",
+            "sync": f["sync"] == "Synced" or f["sync"] == "OutOfSync" and bool(oos) and set(oos) <= chart,
             "revision": f["revision"] == REVISION,
             "operation_revision": dig(started, "sync", "revision") in (None, REVISION),
             "compared": f["compared"] == WANT,
@@ -143,6 +151,10 @@ phases:
             "image": image == "%s@%s" % (dig(spec, "source", "helm", "valuesObject", "image", "repository"), WANT),
             "observed": observed,
             "ready": f["ready"] >= 1,
+            # Every replica updated and available, none of an earlier template.
+            "updated": rs[0] == rs[1] == rs[2] >= (dig(dep, "spec", "replicas") or 1),
+            # A missing HPA shows only as OutOfSync (a missing ServiceMonitor fails app_up).
+            "hpa": "HorizontalPodAutoscaler" in kinds,
         }
         pending = [k for k, v in ok.items() if not v]
         if not pending:
@@ -255,7 +267,7 @@ phases:
         }
         # One poll: done (0) when converged on digest $1, or failed for it ($failure set); else 1.
         converged() {
-          state="$(kq -n "$NS" get "applications.argoproj.io/$APP" "deployment/$APP" --ignore-not-found -o json \
+          state="$(kq -n "$NS" get "applications.argoproj.io/$APP" "deployment/$APP" "hpa/$APP" --ignore-not-found -o json \
             | python3 /tmp/app.py state "$1")" || return 1
           case "$state" in
             converged*) return 0 ;;

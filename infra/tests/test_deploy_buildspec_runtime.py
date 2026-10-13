@@ -5,7 +5,9 @@
 # bugs). The fake runs the in-pod smoke and PromQL scripts for real, against stand-ins for the inference
 # API and Prometheus. Time is a fake clock that only `sleep` advances, so every wait's bound is exercised
 # exactly and fast. Each convergence check is shown to matter alone: the fake falsifies one thing (FAKE_SKEW)
-# and the buildspec without that one check (a negative control) deploys.
+# and the buildspec without that one check (a negative control) deploys. Argo CD reporting OutOfSync after a
+# sync that succeeded (FAKE_OUT_OF_SYNC) deploys only for the chart's HPA and ServiceMonitor, by group, kind,
+# namespace and name, and every other check still stops a skew, a missing HPA or the previous image under it.
 import copy
 import json
 import os
@@ -149,16 +151,20 @@ def stray_calls(state):
     return state.get("unsupported", []) + [c for c in patches if not DIGEST_PATCH.fullmatch(c)]
 
 
-AUTHZ = ("authz patch_app=yes get_app=yes patch_other_app=no create_app=no delete_app=no patch_appproject=no "
-         "argocd_secrets=no create_rolebindings=no")
+AUTHZ = ("authz patch_app=yes get_app=yes get_deployment=yes get_hpa=yes patch_other_app=no create_app=no delete_app=no "
+         "patch_appproject=no argocd_secrets=no create_rolebindings=no")
 PROMQL = ["promql name=app_up value=1", "promql name=ksm_up value=1", "promql name=requests value=1",
           "promql name=latency_mean_ms value=12.5", "promql name=predictions value=1", "promql name=inference_p95_ms value=20.5",
           "promql name=replicas_available value=1", "promql name=hpa_current_replicas value=1"]
 SMOKE = rf"^FINRISK_EVIDENCE smoke=passed model_sha256={MODEL_SHA256} feature_count=4 probability=0\.012300$"
 # FAKE_SKEW name (fakes/kubectl.py) -> the one check of the buildspec's `ok` that it fails.
 SKEWS = {s: s for s in ("sync", "revision", "operation_revision", "compared", "operation", "synced", "synced_revision", "automated",
-                        "health", "image", "observed", "ready")}
-SKEWS.update(source="override", sources="override", manifests="override")
+                        "health", "image", "observed", "ready", "updated", "hpa")}
+SKEWS.update(unknown="sync", source="override", sources="override", manifests="override", sidecar="image", init="image",
+             scaled="updated", unavailable="updated")
+# The objects whose OutOfSync is tolerated, as the argocd line's out_of_sync= names them (group/kind/namespace/name).
+HPA_ID = "autoscaling/HorizontalPodAutoscaler/finrisk/finrisk-inference"
+MONITOR_ID = "monitoring.coreos.com/ServiceMonitor/finrisk/finrisk-inference"
 
 
 def without(*keys):
@@ -199,8 +205,9 @@ try:
         "authz", "argocd_target_revision=" + REVISION, "argocd", "smoke=passed", *["promql"] * 8, lines[-1].split()[0]] \
         and lines[0] == AUTHZ and lines[1] == f"argocd_target_revision={REVISION} previous_digest=none"
     checks["argocd evidence: Synced and Healthy at the PLAN's commit and this digest, by an automated sync"] = any(
-        l.startswith(f"argocd digest={DIGEST[GOOD]} sync=Synced revision={REVISION} compared={DIGEST[GOOD]} operation=Succeeded "
-                     f"synced={DIGEST[GOOD]} synced_revision={REVISION} health=Healthy automated=True overrides=none image={GOOD} ready=1")
+        l.startswith(f"argocd digest={DIGEST[GOOD]} sync=Synced out_of_sync=none revision={REVISION} compared={DIGEST[GOOD]} "
+                     f"operation=Succeeded synced={DIGEST[GOOD]} synced_revision={REVISION} health=Healthy automated=True "
+                     f"overrides=none image={GOOD} ready=1 replicas=1/1/1 ")
         and l.endswith(" pending=none") for l in lines)
     # Argo CD v3.5.3's autoSync puts a copy of spec.source in its operation; that is not an override.
     operation = (first["app"].get("status", {}).get("operationState") or {}).get("operation") or {}
@@ -215,6 +222,7 @@ try:
         print(out)
         raise SystemExit(report_checks())
 
+    only_next = {"FAKE_SKEW_DIGEST": DIGEST[NEXT]}
     runs = {
         "update-ok": (NEXT, "first-ok", {}),
         "update-fails": (BAD, "first-ok", {"FAKE_BAD_IMAGES": DIGEST[BAD]}),
@@ -230,11 +238,31 @@ try:
         "rollback-observe-lag": (BAD, "first-ok", {"FAKE_BAD_IMAGES": DIGEST[BAD], "FAKE_OBSERVE_LAG": "1"}),
         **{"skew-" + s: (NEXT, "first-ok", {"FAKE_SKEW": s, "FAKE_SKEW_DIGEST": DIGEST[NEXT]}) for s in SKEWS},
         "app-read-fails": (NEXT, "first-ok", {"FAKE_APP_GET_FAIL": "1"}),
-        **{"rbac-" + r: (NEXT, "first-ok", {"FAKE_RBAC": r}) for r in ("no-group", "extra-delete", "any-name", "argocd-secrets")},
+        **{"rbac-" + r: (NEXT, "first-ok", {"FAKE_RBAC": r}) for r in ("no-group", "extra-delete", "any-name", "argocd-secrets",
+                                                                      "no-hpa", "no-deployment")},
         **{"prom-" + p: (NEXT, "first-ok", {"FAKE_PROM": p}) for p in ("app-down", "no-ksm", "unscraped", "unreachable")},
         **{"smoke-" + s: (NEXT, "first-ok", {"FAKE_SMOKE": s}) for s in (
             "wrong-sha", "ready-wrong-sha", "predict-wrong-sha", "not-ready", "prob-1.5", "prob-neg", "prob-int")},
         "bad-uri": (GOOD + ";id", "first-ok", {}),
+        # Argo CD reports OutOfSync after the sync succeeded (fakes/kubectl.py FAKE_OUT_OF_SYNC, FAKE_MISSING, FAKE_DRIFT).
+        "oos-first": (GOOD, None, {"FAKE_OUT_OF_SYNC": "ServiceMonitor", "FAKE_SKEW_DIGEST": DIGEST[GOOD]}),
+        "oos-update": (NEXT, "first-ok", {"FAKE_OUT_OF_SYNC": "HorizontalPodAutoscaler,ServiceMonitor", **only_next}),
+        "oos-deployment": (NEXT, "first-ok", {"FAKE_OUT_OF_SYNC": "Deployment", **only_next}),
+        "oos-service": (NEXT, "first-ok", {"FAKE_OUT_OF_SYNC": "Service", **only_next}),
+        "oos-extra-object": (NEXT, "first-ok", {"FAKE_OUT_OF_SYNC": "HorizontalPodAutoscaler,/ConfigMap/finrisk/finrisk-inference-extra",
+                                                **only_next}),
+        "oos-other-namespace": (NEXT, "first-ok", {
+            "FAKE_OUT_OF_SYNC": "HorizontalPodAutoscaler,autoscaling/HorizontalPodAutoscaler/default/finrisk-inference", **only_next}),
+        "oos-other-group": (NEXT, "first-ok", {
+            "FAKE_OUT_OF_SYNC": "ServiceMonitor,example.com/ServiceMonitor/finrisk/finrisk-inference", **only_next}),
+        "missing-service": (NEXT, "first-ok", {"FAKE_MISSING": "Service", **only_next}),
+        "missing-hpa": (NEXT, "first-ok", {"FAKE_MISSING": "HorizontalPodAutoscaler", **only_next}),
+        "missing-servicemonitor": (NEXT, "first-ok", {"FAKE_MISSING": "ServiceMonitor", **only_next}),
+        "drift-previous": (NEXT, "first-ok", {"FAKE_DRIFT": "previous", **only_next}),
+        "oos-rollback": (BAD, "first-ok", {"FAKE_BAD_IMAGES": DIGEST[BAD], "FAKE_OUT_OF_SYNC": "ServiceMonitor",
+                                           "FAKE_SKEW_DIGEST": DIGEST[GOOD]}),
+        **{"oos-skew-" + s: (NEXT, "first-ok", {"FAKE_OUT_OF_SYNC": "HorizontalPodAutoscaler", "FAKE_SKEW": s, **only_next})
+           for s in SKEWS if SKEWS[s] != "sync"},
     }
 
     def spec(change):
@@ -298,9 +326,56 @@ try:
                                                          script=scripts["deadline-ignores-generation"],
                                                          FAKE_BAD_IMAGES=DIGEST[BAD], FAKE_OBSERVE_LAG="1")
     jobs["extra-json-patch"] = lambda: deploy("extra-json-patch", NEXT, "first-ok", script=scripts["extra-json-patch"])
+
+    def mutated(*changes):
+        """The rendered buildspec with each (old, new, count) applied; "exit 99" when old does not occur count times."""
+        text = TEMPLATE
+        for old, new, count in changes:
+            if text.count(old) != count:
+                return "exit 99"
+            text = text.replace(old, new)
+        return render(text)
+
+    # Negative controls for the OutOfSync tolerance: PR 2b's Synced-only check hangs on it; without the
+    # chart-object or the non-empty condition, an extra object or an empty list passes; tolerating all four
+    # chart objects lets drift on the Deployment or Service through; keyed without the namespace or the group,
+    # a same-named object elsewhere passes; an image check of the inference container alone misses a sidecar;
+    # without the hpa or image check, a missing HPA or the previous image under OutOfSync deploys.
+    sync_line = '"sync": f["sync"] == "Synced" or f["sync"] == "OutOfSync" and bool(oos) and set(oos) <= chart,'
+    image_line = ('image = ",".join(c.get("image") or "none" for k in ("initContainers", "containers") '
+                  'for c in dig(dep, "spec", "template", "spec", k) or []) or "none"')
+    key = '("group", "kind", "namespace", "name")'
+    four = ("chart = {", 'chart = {"apps/Deployment/${namespace}/${app}", "/Service/${namespace}/${app}", ', 1)
+    tolerance_controls = {
+        "synced-only": (mutated((sync_line, '"sync": f["sync"] == "Synced",', 1)),
+                        {"FAKE_OUT_OF_SYNC": "HorizontalPodAutoscaler,ServiceMonitor", **only_next}),
+        "any-object": (mutated((" and set(oos) <= chart,", ",", 1)),
+                       {"FAKE_OUT_OF_SYNC": "HorizontalPodAutoscaler,/ConfigMap/finrisk/finrisk-inference-extra", **only_next}),
+        "nothing-listed": (mutated((" and bool(oos)", "", 1)), {"FAKE_SKEW": "sync", **only_next}),
+        "four-objects-deployment": (mutated(four), {"FAKE_OUT_OF_SYNC": "Deployment", **only_next}),
+        "four-objects-service": (mutated(four), {"FAKE_OUT_OF_SYNC": "Service", **only_next}),
+        "no-namespace": (mutated((key, '("group", "kind", "name")', 1), ("/${namespace}/${app}", "/${app}", 2)),
+                         {"FAKE_OUT_OF_SYNC": "HorizontalPodAutoscaler,autoscaling/HorizontalPodAutoscaler/default/finrisk-inference",
+                          **only_next}),
+        "no-group": (mutated((key, '("kind", "namespace", "name")', 1),
+                             ('"autoscaling/HorizontalPodAutoscaler/', '"HorizontalPodAutoscaler/', 1),
+                             ('"monitoring.coreos.com/ServiceMonitor/', '"ServiceMonitor/', 1)),
+                     {"FAKE_OUT_OF_SYNC": "ServiceMonitor,example.com/ServiceMonitor/finrisk/finrisk-inference", **only_next}),
+        "inference-container-only": (mutated((image_line, 'image = next((c.get("image") for c in dig(dep, "spec", "template", "spec", '
+                                                          '"containers") or [] if c.get("name") == "inference"), "none")', 1)),
+                                     {"FAKE_SKEW": "sidecar", **only_next}),
+        "missing-hpa-without-hpa": (without("hpa"), {"FAKE_MISSING": "HorizontalPodAutoscaler", **only_next}),
+        "drift-without-image": (without("image"), {"FAKE_DRIFT": "previous", **only_next}),
+        # Not a tolerance control: without the HPA preflight, a runner that cannot read the HPA patches, then
+        # neither the update nor the re-patch can converge.
+        "no-hpa-preflight": (mutated(('        expect get_hpa yes get "hpa/$APP" -n "$NS"\n', "", 1)), {"FAKE_RBAC": "no-hpa"}),
+    }
+    jobs.update({"control " + n: (lambda n=n, c=c: deploy("control-" + n, NEXT, "first-ok", script=c[0], **c[1]))
+                 for n, c in tolerance_controls.items()})
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = dict(zip(jobs, pool.map(lambda f: f(), jobs.values())))
-    controls = {"trusts-stale-status", "deadline-ignores-generation", "extra-json-patch", *("without " + s for s in SKEWS)}
+    controls = {"trusts-stale-status", "deadline-ignores-generation", "extra-json-patch", *("without " + s for s in SKEWS),
+                *("control " + n for n in tolerance_controls)}
     every = [first, *(r[2] for name, r in results.items() if name not in controls)]
     checks["no call reaches the API server without a bound (fake kubectl refuses one)"] = not any(s.get("unbounded") for s in every)
     checks["no call the fake does not model, and no patch but the digest patch, in any scenario"] = not any(map(stray_calls, every))
@@ -373,6 +448,68 @@ try:
         checks[f"negative control: without the {key} check, the {s} skew deploys"] = code == 0 \
             and result(out).startswith(f"result=deployed image_uri={NEXT} ")
 
+    def argocd_line(out):
+        return next((l for l in evidence(out) if l.startswith("argocd digest=")), "")
+
+    def stopped(name, pending):
+        """Never converged (the last poll pending exactly `pending`), never served, then rolled back."""
+        code, out, state, _ = results[name]
+        return code == 1 and f"failure=timeout digest={DIGEST[NEXT]} state=waiting " in out and f" pending={pending}\n" in out \
+            and "smoke=passed" not in out and not argocd_line(out) and image(state) == GOOD \
+            and result(out) == f"result=rolled_back digest={DIGEST[NEXT]} previous_digest={DIGEST[GOOD]}"
+
+    code, out, state, _ = results["oos-first"]
+    checks["first deploy: OutOfSync on the ServiceMonitor after a successful sync deploys and is recorded"] = code == 0 \
+        and result(out) == f"result=deployed image_uri={GOOD} revision=1 argocd_revision={REVISION} previous_digest=none" \
+        and argocd_line(out).startswith(f"argocd digest={DIGEST[GOOD]} sync=OutOfSync out_of_sync={MONITOR_ID} ") \
+        and argocd_line(out).endswith(" pending=none") and re.search(SMOKE, out, re.M) is not None
+    code, out, state, _ = results["oos-update"]
+    checks["update: OutOfSync on the HPA and ServiceMonitor deploys after self-heal re-syncs, with both recorded"] = code == 0 \
+        and result(out).startswith(f"result=deployed image_uri={NEXT} revision=2 ") and image(state) == NEXT \
+        and f" out_of_sync={HPA_ID},{MONITOR_ID} " in argocd_line(out) \
+        and f" image={NEXT} ready=1 replicas=1/1/1 " in argocd_line(out) and only_digest_patches(state, DIGEST[NEXT]) \
+        and state["polls"] - state["synced_at"][DIGEST[NEXT]] > 2
+    checks["OutOfSync on the Deployment is never tolerated (drift other than its image would pass)"] = stopped("oos-deployment", "sync")
+    checks["OutOfSync on the Service is never tolerated (the smoke test goes through it)"] = stopped("oos-service", "sync")
+    checks["an object outside the chart out of sync is never tolerated"] = stopped("oos-extra-object", "sync")
+    checks["an HPA of the same name in another namespace out of sync is never tolerated"] = stopped("oos-other-namespace", "sync")
+    checks["a ServiceMonitor kind of another API group out of sync is never tolerated"] = stopped("oos-other-group", "sync")
+    checks["a missing Service (OutOfSync, health still Healthy) never converges"] = stopped("missing-service", "sync")
+    checks["a missing HPA (OutOfSync, health still Healthy) never converges"] = stopped("missing-hpa", "hpa")
+    checks["the previous image kept live, with Argo CD alternating OutOfSync and Synced, never converges"] = stopped(
+        "drift-previous", "sync,image")
+    code, out, state, _ = results["missing-servicemonitor"]
+    checks["a missing ServiceMonitor (OutOfSync, as a changed one) fails the PromQL evidence: observability_failed"] = code == 1 \
+        and f" out_of_sync={MONITOR_ID} " in argocd_line(out) and re.search(SMOKE, out, re.M) is not None \
+        and "promql failed: app_up, requests, latency_mean_ms, predictions\n" in out and image(state) == NEXT \
+        and result(out).startswith(f"result=observability_failed image_uri={NEXT} ") and only_digest_patches(state, DIGEST[NEXT])
+    for s, key in SKEWS.items():
+        if key != "sync":
+            checks[f"under a tolerated OutOfSync, convergence still needs {key} ({s} falsified)"] = stopped("oos-skew-" + s, key)
+    code, out, state, _ = results["control synced-only"]
+    checks["negative control: PR 2b's Synced-only check waits out the bound on that OutOfSync, then rolls back"] = code == 1 \
+        and f"failure=timeout digest={DIGEST[NEXT]} state=waiting sync=OutOfSync " in out and " pending=sync\n" in out \
+        and result(out) == f"result=rolled_back digest={DIGEST[NEXT]} previous_digest={DIGEST[GOOD]}"
+    for name, what in {"any-object": "tolerating any out-of-sync object, one outside the chart",
+                       "nothing-listed": "tolerating OutOfSync with no object listed, the sync skew",
+                       "four-objects-deployment": "tolerating the Deployment too, its OutOfSync",
+                       "four-objects-service": "tolerating the Service too, its OutOfSync",
+                       "no-namespace": "keyed without the namespace, the HPA's name in another namespace",
+                       "no-group": "keyed without the group, a ServiceMonitor kind of another group",
+                       "inference-container-only": "checking the inference container's image alone, a sidecar",
+                       "missing-hpa-without-hpa": "without the hpa check, a missing HPA under OutOfSync",
+                       "drift-without-image": "without the image check, the previous image under OutOfSync"}.items():
+        code, out, state, _ = results["control " + name]
+        checks[f"negative control: {what} deploys"] = code == 0 and result(out).startswith(f"result=deployed image_uri={NEXT} ")
+    code, out, state, _ = results["control no-hpa-preflight"]
+    checks["negative control: without the HPA preflight, a runner that cannot read the HPA patches, then cannot re-patch"] = \
+        code == 1 and only_digest_patches(state, DIGEST[NEXT], DIGEST[GOOD]) \
+        and result(out) == f"result=rollback_failed digest={DIGEST[NEXT]} previous_digest={DIGEST[GOOD]} failure=timeout"
+    code, out, state, _ = results["oos-rollback"]
+    checks["a re-patch that Argo CD reports OutOfSync on a chart object still completes the rollback"] = code == 1 \
+        and f"failure=progress_deadline digest={DIGEST[BAD]}" in out and image(state) == GOOD \
+        and result(out) == f"result=rolled_back digest={DIGEST[BAD]} previous_digest={DIGEST[GOOD]}"
+
     code, out, state, _ = results["rollback-observe-lag"]
     checks["a re-patch is not failed on the previous image's progress deadline before the Deployment observes it"] = \
         code == 1 and result(out) == f"result=rolled_back digest={DIGEST[BAD]} previous_digest={DIGEST[GOOD]}" and image(state) == GOOD
@@ -390,7 +527,7 @@ try:
             and "Application not as reviewed" in out and result(out) is None
 
     for name, answer in {"no-group": "patch_app=no", "extra-delete": "delete_app=yes", "any-name": "patch_other_app=yes",
-                         "argocd-secrets": "argocd_secrets=yes"}.items():
+                         "argocd-secrets": "argocd_secrets=yes", "no-hpa": "get_hpa=no", "no-deployment": "get_deployment=no"}.items():
         code, out, state, _ = results["rbac-" + name]
         checks[f"authorization preflight ({answer}) stops before any change"] = code == 1 and unchanged(state) \
             and answer in out and "unexpected authorization:" in out and result(out) is None

@@ -2,12 +2,12 @@
 """Stateful kubectl stand-in for executing the deploy buildspec in tests.
 
 Models what the GitOps deploy depends on: the Argo CD Application finrisk/finrisk-inference (spec and
-status), an Argo CD controller that reacts to a changed image.digest parameter one poll at a time, the
-Deployment it syncs, the deploy runner's authorization, and the two in-pod scripts. The Application
-starts as the bootstrap leaves it (the test writes it into FAKE_STATE). Any call it does not model fails,
-so a new call in the buildspec cannot pass unnoticed; every call that reaches the API server must be
-bounded: kq's --request-timeout, rollout status --timeout, or exec under `timeout` (the stub exports
-FAKE_TIMEOUT).
+status, with the per-object sync status of its four chart objects), an Argo CD controller that reacts to
+a changed image.digest parameter one poll at a time, the Deployment and HPA it syncs (as the deploy reads
+them), the deploy runner's authorization, and the two in-pod scripts. The Application starts as the
+bootstrap leaves it (the test writes it into FAKE_STATE). Any call it does not model fails, so a new call in the buildspec
+cannot pass unnoticed; every call that reaches the API server must be bounded: kq's --request-timeout,
+rollout status --timeout, or exec under `timeout` (the stub exports FAKE_TIMEOUT).
 
 Authorization: AmazonEKSEditPolicy in finrisk (no RBAC objects, nothing of Argo CD's) plus the Role of
 infra/k8s/inference-app.yaml (get, watch, patch on applications/finrisk-inference in finrisk). Calls are
@@ -16,6 +16,8 @@ enforced (Forbidden) and `auth can-i` answers from the same rules. FAKE_RBAC cha
   extra-delete    the Role also grants delete
   any-name        the Role has no resourceNames
   argocd-secrets  the runner can read Secrets in argocd
+  no-hpa          Edit without get on HorizontalPodAutoscalers
+  no-deployment   Edit without get on Deployments
 
 Controller, per poll of the Application after its digest changed (FAKE_CONTROLLER):
   normal (default)  refresh (OutOfSync, an automated operation Running), sync (Succeeded, Deployment
@@ -33,11 +35,26 @@ late (observedGeneration behind, the previous Progressing condition still shown)
 reading the Application fail.
 
 FAKE_SKEW=<name> falsifies one thing in every answer about the digest FAKE_SKEW_DIGEST once it is synced,
-so each convergence check in the deploy buildspec's `ok` is shown to matter on its own: sync (OutOfSync),
+so each convergence check in the deploy buildspec's `ok` is shown to matter on its own: sync (OutOfSync,
+no object listed out of sync), unknown (OutOfSync, the HPA listed OutOfSync and the Deployment Unknown),
 revision, operation_revision, synced_revision (another commit), compared (no digest compared), operation
 (still Running), synced (another digest synced), automated (started by a user), source (the operation's
 own source has an extra parameter), sources and manifests (operation overrides), health (Degraded), image
-(the Deployment runs another digest), observed (observedGeneration behind), ready (no ready replica).
+(the Deployment runs another digest), sidecar and init (its template also runs another image, in a
+container or an init container), observed (observedGeneration behind), ready (no ready replica), updated
+(a replica of the previous template left), scaled (spec.replicas 2, one replica so far), unavailable (the
+replica ready but not available), hpa (the HPA is gone).
+
+After the sync of FAKE_SKEW_DIGEST succeeded, as Argo CD v3.5.3 can report it. An entry is a chart object
+by kind, or group/Kind/namespace/name for another object (group empty for the core group):
+  FAKE_OUT_OF_SYNC=entry,...  those objects stay OutOfSync, and so the Application, though all is as
+                              synced; self-heal re-syncs with backoff (SELF_HEAL_POLLS: a Running operation
+                              without a result)
+  FAKE_MISSING=Kind           that chart object is gone: listed OutOfSync, the health still Healthy (Argo CD
+                              3.4+ ignores missing objects, and keeps no per-object health in the Application
+                              by default); without the ServiceMonitor, Prometheus has no target for the app
+  FAKE_DRIFT=previous         something else keeps the Deployment on the previous image: the Application
+                              alternates OutOfSync (the Deployment listed) and Synced
 
 exec runs the piped script with Python (python -I -S, the standard library only, as in the image):
   - a script with a BASE line (the smoke test) against a stand-in for the inference API
@@ -69,6 +86,7 @@ state.setdefault("calls", [])
 state.setdefault("deployment", None)
 state.setdefault("requests", 0)
 state.setdefault("progress", 0)
+state.setdefault("polls", 0)
 args = sys.argv[1:]
 state["calls"].append(" ".join(args))
 env = os.environ.get
@@ -129,6 +147,9 @@ def allowed(action, resource, name, ns):
         return RBAC != "no-group" and ns == NS and action in verbs and (name == APP or RBAC == "any-name" and bool(name))
     if ns != NS:  # Edit is scoped to finrisk
         return RBAC == "argocd-secrets" and (action, resource) == ("get", "secrets")
+    if action == "get" and resource in {"no-hpa": ("hpa", "horizontalpodautoscalers.autoscaling"),
+                                        "no-deployment": ("deployment", "deployments.apps")}.get(RBAC, ()):
+        return False
     return not resource.startswith(("appprojects", "rolebindings", "roles", "clusterrole"))
 
 
@@ -152,6 +173,32 @@ if not bounded:
 def digest_of(source):
     params = ((source or {}).get("helm") or {}).get("parameters") or []
     return next((p["value"] for p in params if p.get("name") == "image.digest"), None)
+
+
+# The chart's objects, as Argo CD lists them in status.resources.
+CHART = [("apps", "v1", "Deployment"), ("", "v1", "Service"), ("autoscaling", "v2", "HorizontalPodAutoscaler"),
+         ("monitoring.coreos.com", "v1", "ServiceMonitor")]
+
+
+def resources(out_of_sync):
+    """status.resources: the core group is omitted (omitempty), as Argo CD writes it."""
+    return [{**({"group": g} if g else {}), "version": v, "kind": k, "namespace": NS, "name": APP,
+             "status": "OutOfSync" if k in out_of_sync else "Synced"} for g, v, k in CHART]
+
+
+def entry(text):
+    """A FAKE_OUT_OF_SYNC or FAKE_MISSING entry as a status.resources item: a chart object by kind, or
+    group/Kind/namespace/name."""
+    if "/" in text:
+        group, kind, namespace, name = text.split("/")
+        return {**({"group": group} if group else {}), "version": "v1", "kind": kind, "namespace": namespace, "name": name,
+                "requiresPruning": True}
+    group, version, kind = next(c for c in CHART if c[2] == text)
+    return {**({"group": group} if group else {}), "version": version, "kind": kind, "namespace": NS, "name": APP}
+
+
+def identity(resource):
+    return tuple(resource.get(k) or "" for k in ("group", "kind", "namespace", "name"))
 
 
 def tick():
@@ -182,7 +229,8 @@ def tick():
     if policy.get("syncOptions"):
         operation["sync"]["syncOptions"] = policy["syncOptions"]
     status.update(sync={"status": "OutOfSync", "revision": revision, "comparedTo": {"source": source,
-                  "destination": spec["destination"]}}, conditions=[])
+                  "destination": spec["destination"]}}, conditions=[],
+                  resources=resources({k for _, _, k in CHART} if dep is None else {"Deployment"}))
     if step == 1:
         app["operation"] = operation
         status["operationState"] = {"phase": "Running", "operation": operation}
@@ -198,12 +246,13 @@ def tick():
         return
     status["operationState"] = {"phase": "Succeeded", "operation": operation, "syncResult": result}
     status["sync"]["status"] = "Synced"
+    status["resources"] = resources(set())
     image = spec["source"]["helm"]["valuesObject"]["image"]["repository"] + "@" + want
     if dep is None:
         dep = state["deployment"] = {"image": image, "revision": 1, "since": step, "generation": 1}
     elif dep["image"] != image:
         # The template changes now; the deployment controller observes it FAKE_OBSERVE_LAG polls later.
-        dep.update(image=image, revision=dep["revision"] + 1, since=step, generation=dep.get("generation", 1) + 1,
+        dep.update(image=image, previous=dep["image"], revision=dep["revision"] + 1, since=step, generation=dep.get("generation", 1) + 1,
                    lag=int(env("FAKE_OBSERVE_LAG", "0")), shown=progressing(dep), deadline=False)
     status["summary"] = {"images": [image]}
     bad = want in set(filter(None, env("FAKE_BAD_IMAGES", "").split(",")))
@@ -230,30 +279,75 @@ def progressing(dep):
     return "ProgressDeadlineExceeded" if dep.get("deadline") else "NewReplicaSetAvailable" if ready() else "ReplicaSetUpdated"
 
 
-def deployment_object():
+def workload():
+    """The Deployment and HPA, as the get the deploy polls with returns them."""
     dep = state["deployment"]
     generation, lag = dep.get("generation", 1), dep.get("lag", 0)
-    return {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": APP, "namespace": NS, "generation": generation,
-            "annotations": {"deployment.kubernetes.io/revision": str(dep["revision"])}},
-            "spec": {"template": {"spec": {"containers": [{"name": c, "image": dep["image"]} for c in CONTAINERS]}}},
-            "status": {"observedGeneration": generation - 1 if lag else generation, "readyReplicas": ready(),
-                       "conditions": [{"type": "Progressing", "reason": dep["shown"] if lag else progressing(dep)}]}}
+    meta = {"name": APP, "namespace": NS}
+    return [{"apiVersion": "apps/v1", "kind": "Deployment", "metadata": dict(meta, generation=generation,
+             annotations={"deployment.kubernetes.io/revision": str(dep["revision"])}),
+             "spec": {"replicas": 1, "template": {"spec": {"containers": [{"name": c, "image": dep["image"]} for c in CONTAINERS]}}},
+             "status": {"observedGeneration": generation - 1 if lag else generation, "replicas": 1, "updatedReplicas": 1,
+                        "availableReplicas": ready(), "readyReplicas": ready(),
+                        "conditions": [{"type": "Progressing", "reason": dep["shown"] if lag else progressing(dep)}]}},
+            {"apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler", "metadata": meta,
+             "spec": {"minReplicas": 1, "maxReplicas": 3}, "status": {"currentReplicas": 1}}]
 
 
 OTHER_COMMIT = "f" * 40
 OTHER_DIGEST = "sha256:" + "0" * 64
+BUSYBOX = "public.ecr.aws/docker/library/busybox@" + OTHER_DIGEST
 
 
-def skew(app, dep):
+# Self-heal re-syncs an Application that stays OutOfSync with v3.5.3's default backoff (2 s, factor 3, cap
+# 300 s): at 2, 8, 26, 80 and 242 s, so these 5-second polls after the sync.
+SELF_HEAL_POLLS = (1, 2, 6, 16, 49)
+
+
+def after_sync(app, items):
+    """FAKE_OUT_OF_SYNC, FAKE_MISSING, FAKE_DRIFT: once the sync of FAKE_SKEW_DIGEST succeeded."""
+    status, scoped = app["status"], env("FAKE_SKEW_DIGEST")
+    op = status.get("operationState") or {}
+    if op.get("phase") != "Succeeded" or digest_of((op.get("syncResult") or {}).get("source")) != scoped \
+            or digest_of(app["spec"]["source"]) != scoped:
+        return
+    listed = [entry(e) for e in filter(None, env("FAKE_OUT_OF_SYNC", "").split(","))]
+    if env("FAKE_MISSING"):
+        items[:] = [i for i in items if i["kind"] != env("FAKE_MISSING")]
+        listed.append(entry(env("FAKE_MISSING")))
+    if env("FAKE_DRIFT") == "previous":
+        previous = state["deployment"].get("previous") or "none"
+        next(i for i in items if i["kind"] == "Deployment")["spec"]["template"]["spec"]["containers"][0]["image"] = previous
+        status["summary"] = {"images": [previous]}
+        listed += [entry("Deployment")] if state["polls"] % 2 else []
+    if not listed:
+        return
+    status["sync"]["status"] = "OutOfSync"
+    entries = {identity(r): r for r in status.get("resources") or []}
+    for resource in listed:
+        entries.setdefault(identity(resource), resource)["status"] = "OutOfSync"
+    status["resources"] = list(entries.values())
+    since = state.setdefault("synced_at", {}).setdefault(scoped, state["polls"])
+    if env("FAKE_OUT_OF_SYNC") and state["polls"] - since in SELF_HEAL_POLLS:
+        app["operation"] = copy.deepcopy(op["operation"])
+        status["operationState"] = {"phase": "Running", "operation": copy.deepcopy(op["operation"])}
+
+
+def skew(app, items):
     """FAKE_SKEW: one falsehood in an answer whose Application has a sync result and a Deployment."""
     name, status = env("FAKE_SKEW", ""), app["status"]
     op = status.get("operationState") or {}
+    dep = next((i for i in items if i["kind"] == "Deployment"), None)
     if not name or "syncResult" not in op or not dep or digest_of(app["spec"]["source"]) != env("FAKE_SKEW_DIGEST"):
         return
     sync, result = op["operation"]["sync"], op["syncResult"]
     extra = {"name": "replicaCount", "value": "0"}
+    template = dep["spec"]["template"]["spec"]
+    unknown = {"HorizontalPodAutoscaler": "OutOfSync", "Deployment": "Unknown"}
     {
         "sync": lambda: status["sync"].update(status="OutOfSync"),
+        "unknown": lambda: [status["sync"].update(status="OutOfSync")] + [
+            r.update(status=unknown[r["kind"]]) for r in status["resources"] if r["kind"] in unknown],
         "revision": lambda: status["sync"].update(revision=OTHER_COMMIT),
         "operation_revision": lambda: sync.update(revision=OTHER_COMMIT),
         "synced_revision": lambda: result.update(revision=OTHER_COMMIT),
@@ -265,10 +359,15 @@ def skew(app, dep):
         "sources": lambda: sync.update(sources=[copy.deepcopy(sync["source"])]),
         "manifests": lambda: sync.update(manifests=["apiVersion: v1\nkind: ConfigMap\n"]),
         "health": lambda: status.update(health={"status": "Degraded"}),
-        "image": lambda: dep["spec"]["template"]["spec"]["containers"][0].update(image=dep["spec"]["template"]["spec"][
-            "containers"][0]["image"].split("@")[0] + "@" + OTHER_DIGEST),
+        "image": lambda: template["containers"][0].update(image=template["containers"][0]["image"].split("@")[0] + "@" + OTHER_DIGEST),
+        "sidecar": lambda: template["containers"].append({"name": "proxy", "image": BUSYBOX}),
+        "init": lambda: template.update(initContainers=[{"name": "setup", "image": BUSYBOX}]),
         "observed": lambda: dep["status"].update(observedGeneration=dep["metadata"]["generation"] - 1),
         "ready": lambda: dep["status"].update(readyReplicas=0),
+        "updated": lambda: dep["status"].update(replicas=2, availableReplicas=2),
+        "scaled": lambda: dep["spec"].update(replicas=2),
+        "unavailable": lambda: dep["status"].update(availableReplicas=0),
+        "hpa": lambda: items.remove(next(i for i in items if i["kind"] == "HorizontalPodAutoscaler")),
     }[name]()
 
 
@@ -345,7 +444,8 @@ class InferenceApi(BaseHTTPRequestHandler):
 
 class PrometheusApi(BaseHTTPRequestHandler):
     """GET /api/v1/query for the queries the PromQL script makes; one series or none per query."""
-    scenario = env("FAKE_PROM", "ok")
+    # Without the ServiceMonitor, Prometheus has no target for the app.
+    scenario = "unscraped" if env("FAKE_MISSING") == "ServiceMonitor" else env("FAKE_PROM", "ok")
 
     def log_message(self, *_):
         pass
@@ -401,7 +501,7 @@ def run_in_pod(script):
         # A script that skips the Service would otherwise bypass the stand-in.
         if url.scheme != "http" or url.path or not service:
             done(2, err="fake kubectl: smoke script has no BASE line for a Service\n")
-        reachable = SERVICES.get(service[1], {}).get(str(url.port or 80), False)
+        reachable = SERVICES.get(service[1], {}).get(str(url.port or 80), False) and env("FAKE_MISSING") != "Service"
         handler = InferenceApi
     else:
         reachable = url.scheme == "http" and url.netloc == PROMETHEUS and not url.path and env("FAKE_PROM") != "unreachable"
@@ -443,14 +543,17 @@ if positional == ["get", "applications.argoproj.io", APP] and output == "json":
     if state.get("app") is None:
         done(1, err=f'Error from server (NotFound): applications.argoproj.io "{APP}" not found\n')
     done(out=json.dumps(state["app"], indent=2) + "\n")
-if positional == ["get", f"applications.argoproj.io/{APP}", f"deployment/{APP}"] and output == "json" \
-        and "--ignore-not-found" in flags:
-    if not allowed("get", "applications.argoproj.io", APP, namespace):
-        forbidden("get", "applications.argoproj.io", APP)
+if positional == ["get", f"applications.argoproj.io/{APP}", f"deployment/{APP}", f"hpa/{APP}"] \
+        and output == "json" and "--ignore-not-found" in flags:
+    for resource in ("applications.argoproj.io", "deployments.apps", "horizontalpodautoscalers.autoscaling"):
+        if not allowed("get", resource, APP, namespace):
+            forbidden("get", resource, APP)
+    state["polls"] += 1
     tick()
-    app, dep = copy.deepcopy(state["app"]), deployment_object() if state["deployment"] else None
-    skew(app, dep)
-    items = [app] + ([dep] if dep else [])
+    app = copy.deepcopy(state["app"])
+    items = [app] + (workload() if state["deployment"] else [])
+    after_sync(app, items)
+    skew(app, items)
     done(out=json.dumps({"apiVersion": "v1", "kind": "List", "items": items, "metadata": {}}, indent=2) + "\n")
 if positional == ["patch", "applications.argoproj.io", APP]:
     if not allowed("patch", "applications.argoproj.io", APP, namespace):

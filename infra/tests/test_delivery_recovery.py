@@ -222,7 +222,7 @@ WRITE_CONTROLS = {
     "the digest patch as a JSON patch": ("--type=merge --field-manager=finrisk-digest", "--type=json --field-manager=finrisk-digest"),
 }
 CONVERGENCE = [
-    '            "sync": f["sync"] == "Synced",',
+    '            "sync": f["sync"] == "Synced" or f["sync"] == "OutOfSync" and bool(oos) and set(oos) <= chart,',
     '            "revision": f["revision"] == REVISION,',
     '            "operation_revision": dig(started, "sync", "revision") in (None, REVISION),',
     '            "compared": f["compared"] == WANT,',
@@ -235,6 +235,10 @@ CONVERGENCE = [
     '            "image": image == "%s@%s" % (dig(spec, "source", "helm", "valuesObject", "image", "repository"), WANT),',
     '            "observed": observed,',
     '            "ready": f["ready"] >= 1,',
+    '            # Every replica updated and available, none of an earlier template.',
+    '            "updated": rs[0] == rs[1] == rs[2] >= (dig(dep, "spec", "replicas") or 1),',
+    '            # A missing HPA shows only as OutOfSync (a missing ServiceMonitor fails app_up).',
+    '            "hpa": "HorizontalPodAutoscaler" in kinds,',
 ]
 ok_block = re.search(r"\n        ok = \{\n(.*?)\n        \}\n", buildspec, re.S)
 kubectl_verbs = sorted(set(re.findall(r'(?:\bkq|"\$K")(?: -n "\$NS")? (\w+(?: can-i| status)?)', shell)))
@@ -266,10 +270,23 @@ checks = {
     "kubectl only reads, asks, patches, waits and execs (no apply, create, delete, scale, undo)":
         kubectl_verbs == ["auth can-i", "exec", "get", "patch", "rollout status", "version"] and not writes,
     # Each check is also shown to matter alone by a FAKE_SKEW scenario in test_deploy_buildspec_runtime.py.
-    "convergence needs Synced, the PLAN's commit, the compared and synced digests, Succeeded, an automated sync of the "
-    "Application's own source, Healthy, and the Deployment observed running the image with a ready replica":
+    "convergence needs Synced (or OutOfSync on the chart's HPA and ServiceMonitor only), the PLAN's commit, the compared and "
+    "synced digests, Succeeded, an automated sync of the Application's own source, Healthy, the Deployment observed running "
+    "only the image, every replica updated and available, and the HPA present":
         ok_block is not None and ok_block[1].splitlines() == CONVERGENCE
         and "        if not pending:\n            verdict = \"converged\"\n" in buildspec,
+    # Never the Deployment or the Service: drift there could change what serves or the smoke test's path.
+    "OutOfSync is tolerated only for the chart's HPA and ServiceMonitor, by group, kind, namespace and name; every template "
+    "image counts, init containers included; the poll reads the HPA, and the preflight checks it may":
+        '        chart = {"autoscaling/HorizontalPodAutoscaler/${namespace}/${app}", '
+        '"monitoring.coreos.com/ServiceMonitor/${namespace}/${app}"}\n' in buildspec
+        and '        oos = ["/".join(r.get(k) or "" for k in ("group", "kind", "namespace", "name")) '
+            'for r in status.get("resources") or [] if r.get("status") != "Synced"]\n' in buildspec
+        and '        image = ",".join(c.get("image") or "none" for k in ("initContainers", "containers") '
+            'for c in dig(dep, "spec", "template", "spec", k) or []) or "none"\n' in buildspec
+        and 'get "applications.argoproj.io/$APP" "deployment/$APP" "hpa/$APP" --ignore-not-found -o json' in shell
+        and '        expect get_deployment yes get "deployment/$APP" -n "$NS"\n'
+            '        expect get_hpa yes get "hpa/$APP" -n "$NS"\n' in buildspec,
     # Argo CD v3.5.3's autoSync copies spec.source into its operation; only another source is an override.
     "an operation override is sources, manifests, or a source other than the Application's":
         '        override = [k for k in ("sources", "manifests") if dig(started, "sync", k)]\n'
