@@ -5,7 +5,8 @@ name: Deploy FinRisk Inference
 # FINRISK_IMAGE_URI (a digest-pinned image in this account's repository); it cannot change what
 # they run. The deploy buildspec sets that digest on the Argo CD Application, waits for Argo CD to
 # converge on it, runs the smoke test and records PromQL evidence, and re-patches the previous
-# digest on failure (a failed first deploy is left in place until DESTROY).
+# digest on failure (a failed first deploy is left in place until DESTROY). A serving release is
+# then load-tested: a short-lived Job drives the HPA to at least 2 replicas, and is deleted again.
 #
 # There is no image input: it deploys the image Build Inference Image pushed for this same
 # commit. The expected model SHA-256 and the commit Argo CD deploys the chart from were fixed at
@@ -34,7 +35,7 @@ jobs:
   deploy:
     environment: portfolio-release
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 96
     steps:
       - uses: actions/checkout@v4
 
@@ -50,7 +51,7 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_RELEASE_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          # Both builds can take up to 80 minutes; requires the role's MaxSessionDuration >= 7200.
+          # Both builds can take up to 86 minutes; requires the role's MaxSessionDuration >= 7200.
           role-duration-seconds: 7200
 
       - name: Resolve immutable ECR image digest
@@ -89,10 +90,11 @@ jobs:
           fi
           echo "gitops_revision_check=$GITHUB_SHA" >> "$EVIDENCE_FILE"
 
-      # Namespace-scoped build; the image URI is the only value the caller supplies.
+      # Namespace-scoped build; the image URI is the only value the caller supplies. Its 36-minute build
+      # timeout (the load test included) plus its 10-minute queue, with the 5 minutes to spare it had before.
       - name: Deploy digest-pinned image
         env:
-          CODEBUILD_WAIT_MINUTES: "45"
+          CODEBUILD_WAIT_MINUTES: "51"
           EVIDENCE_TERMINAL: "result="
         run: exec .github/scripts/run-codebuild.sh "$DEPLOY_PROJECT" "FINRISK_IMAGE_URI=${{ steps.image.outputs.uri }}"
 

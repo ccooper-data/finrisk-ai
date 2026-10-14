@@ -18,7 +18,7 @@ Show the hardened Deployment, readiness/liveness probes, resource requests/limit
 Show OpenTelemetry counters/traces/latency, CloudWatch alarm definitions, and the runtime SLO document. State clearly that 99.9% is an objective for a validation window, not a historical uptime claim.
 
 ### 6. Failure and recovery — 120 seconds
-Show: candidate digest -> authorization preflight -> record the Argo CD Application's current digest -> patch only the image digest -> wait until Argo CD has compared, synced and reports Healthy exactly that digest at the planned commit -> in-pod smoke test against the pinned model -> PromQL evidence -> on failure, re-patch the recorded digest and verify it -> preserve failed status. A failed first deploy has no earlier digest: it is left in place for diagnosis until teardown.
+Show: candidate digest -> authorization preflight -> record the Argo CD Application's current digest -> patch only the image digest -> wait until Argo CD has compared, synced and reports Healthy exactly that digest at the planned commit -> in-pod smoke test against the pinned model -> PromQL evidence -> a bounded load Job drives the HPA from 1 replica to at least 2 (HPA status and PromQL evidence), and is deleted -> on a deploy failure, re-patch the recorded digest and verify it -> preserve failed status. A failed first deploy has no earlier digest: it is left in place for diagnosis until teardown.
 
 Leadership point: recovery success does not convert a failed change into a successful change; the failed deployment remains visible for investigation.
 

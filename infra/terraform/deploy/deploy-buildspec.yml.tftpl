@@ -1,9 +1,6 @@
 version: 0.2
 
-# Deploy through Argo CD, as Edit in ${namespace} plus a group that may only read and patch the
-# Application ${namespace}/${app}; the only write is image.digest. Fixed by Terraform, reviewed with
-# the plan; IAM lets the release role override only FINRISK_IMAGE_URI, checked again below. Waits
-# bounded; only the last evidence line has "result=".
+# Sets image.digest on the Argo CD Application, verifies it, then load-tests the HPA with a Job it deletes.
 
 env:
   shell: bash
@@ -17,23 +14,27 @@ phases:
         APP="${app}"
         TARGET_REVISION=${gitops_revision}
 
-        # Defense in depth behind IAM: exact registry, repository and digest form; no tags,
-        # no other registry or repository, nothing after the digest.
+        # Behind IAM: this repository by digest only.
         if [[ ! "$FINRISK_IMAGE_URI" =~ ^${account_id}\.dkr\.ecr\.${region}\.amazonaws\.com/${repository}@sha256:[0-9a-f]{64}$ ]]; then
           echo "FINRISK_IMAGE_URI rejected"
           exit 1
         fi
         DIGEST="$${FINRISK_IMAGE_URI#*@}"
-        # The PLAN's commit, which the bootstrap pinned the Application to ("unset" without -var).
         [[ "$TARGET_REVISION" =~ ^[0-9a-f]{40}$ ]] || { echo "gitops revision refused: $TARGET_REVISION"; exit 1; }
 
-        # Pinned kubectl, verified against a checksum fixed in this file.
+        # Pinned kubectl and the infra/k8s files, each checked against its sha256.
         mkdir -p /opt/finrisk/bin
         curl -fsSL --retry 3 --retry-connrefused --retry-max-time 20 --max-time 40 -o /tmp/kubectl "https://dl.k8s.io/release/${kubectl_version}/bin/linux/amd64/kubectl"
         echo "${kubectl_sha256}  /tmp/kubectl" | sha256sum --check --strict
         install -m 0755 /tmp/kubectl /opt/finrisk/bin/kubectl
         K=/opt/finrisk/bin/kubectl
         "$K" version --client
+        printf '%s' "${k8s_bundle_b64}" | base64 -d | gunzip | awk '/^#==> /{f="/tmp/"$2; next} {print > f}'
+        sha256sum --check --strict <<EOF
+        ${smoke_sha256}  /tmp/smoke.py
+        ${promql_sha256}  /tmp/promql.py
+        ${load_job_sha256}  /tmp/load-job.yaml
+        EOF
 
         aws eks update-kubeconfig --name "${cluster_name}" --region "${region}"
 
@@ -48,11 +49,11 @@ phases:
         }
         kq() { "$K" --request-timeout=10s "$@"; }
 
-        # Access entries are eventually consistent; the bootstrap created the namespace.
+        # Access entries are eventually consistent.
         reachable() { kq -n "$NS" get serviceaccount default >/dev/null 2>&1; }
         wait_for 60 reachable || { echo "namespace $NS is not reachable (run the bootstrap build first)"; exit 1; }
 
-        # Live authorization, before any change; any other answer stops here.
+        # Live authorization, before any change.
         authz="" unexpected=""
         expect() {  # <name> <yes|no> <auth can-i arguments>
           local answer
@@ -74,8 +75,7 @@ phases:
         echo "FINRISK_EVIDENCE authz$authz"
         [ -z "$unexpected" ] || { echo "unexpected authorization:$unexpected; nothing changed"; exit 1; }
 
-        # validate <uri>: the bootstrap's Application but for the digest, nothing pending; prints the digest.
-        # state <digest>: one poll; converged when all of `ok` holds (never on a previous digest's status).
+        # validate: the bootstrap's Application but the digest. state: one poll, converged when all `ok`.
         cat > /tmp/app.py <<'PY'
         import json
         import re
@@ -175,137 +175,89 @@ phases:
         fi
         echo "FINRISK_EVIDENCE argocd_target_revision=$TARGET_REVISION previous_digest=$PREV_DIGEST"
 
-        # In-pod smoke test through the Service: ready, serving the pinned model, and returning
-        # a valid probability for a request built from the model's own feature list.
-        cat > /tmp/smoke.py <<'PY'
-        import json
-        import sys
-        import urllib.request
-
-        EXPECTED = "${model_sha256}"
-        BASE = "http://${app}.${namespace}.svc.cluster.local"
-
-        def fail(message):
-            print("smoke test failed: " + message)
-            sys.exit(1)
-
-        def get(path):
-            with urllib.request.urlopen(BASE + path, timeout=10) as response:
-                return json.load(response)
-
-        ready = get("/health/ready")
-        if ready.get("status") != "ready" or ready.get("model_sha256") != EXPECTED:
-            fail("readiness " + json.dumps(ready))
-        features = get("/v1/model")["features"]
-        body = json.dumps({"features": dict.fromkeys(features)}).encode()
-        request = urllib.request.Request(
-            BASE + "/v1/risk/predict", data=body, headers={"content-type": "application/json"}, method="POST"
-        )
-        with urllib.request.urlopen(request, timeout=10) as response:
-            prediction = json.load(response)
-        probability = prediction.get("distress_12m_probability")
-        if not isinstance(probability, float) or not 0.0 <= probability <= 1.0:
-            fail("prediction " + json.dumps(prediction))
-        if prediction.get("model_sha256") != EXPECTED:
-            fail("prediction model " + json.dumps(prediction))
-        print("FINRISK_EVIDENCE smoke=passed model_sha256=%s feature_count=%d probability=%.6f"
-              % (EXPECTED, len(features), probability))
-        PY
-
-        # In-pod PromQL, polled for up to 180 s: both scrapes up and the smoke prediction counted. Run by
-        # the image under test, so self-reported like the smoke result. No minimum: recorded only.
-        cat > /tmp/promql.py <<'PY'
-        import json
-        import math
-        import sys
-        import time
-        import urllib.parse
-        import urllib.request
-
-        PROMETHEUS = "${prometheus_url}"
-        NS, APP = 'namespace="${namespace}"', "${app}"
-        PREDICT = NS + ',http_target="/v1/risk/predict"'
-        QUERIES = [
-            ("app_up", 'min(up{%s,service="%s"})' % (NS, APP), 1),
-            ("ksm_up", 'min(up{job="kube-state-metrics"})', 1),
-            ("requests", "sum(http_server_duration_milliseconds_count{%s})" % PREDICT, 1),
-            ("latency_mean_ms", "sum(http_server_duration_milliseconds_sum{%s}) / sum(http_server_duration_milliseconds_count{%s})"
-             % (PREDICT, PREDICT), 0),
-            ("predictions", "sum(finrisk_predictions_total{%s})" % NS, 1),
-            ("inference_p95_ms", "histogram_quantile(0.95, sum by (le) (finrisk_inference_duration_milliseconds_bucket{%s}))" % NS, None),
-            ("replicas_available", 'kube_deployment_status_replicas_available{%s,deployment="%s"}' % (NS, APP), None),
-            ("hpa_current_replicas", 'kube_horizontalpodautoscaler_status_current_replicas{%s,horizontalpodautoscaler="%s"}' % (NS, APP), None),
-        ]
-
-        def value(query):
-            try:
-                url = PROMETHEUS + "/api/v1/query?" + urllib.parse.urlencode({"query": query})
-                with urllib.request.urlopen(url, timeout=5) as response:
-                    result = json.load(response)["data"]["result"]
-                return float(result[0]["value"][1]) if len(result) == 1 else None
-            except (OSError, ValueError, KeyError, IndexError, TypeError):
-                return None
-
-        deadline = time.monotonic() + 180
-        while True:
-            values = {name: value(query) for name, query, _ in QUERIES}
-            missing = [n for n, _, low in QUERIES if low is not None and not (values[n] is not None and math.isfinite(values[n]) and values[n] >= low)]
-            if not missing or time.monotonic() >= deadline:
-                break
-            time.sleep(min(10, max(0, deadline - time.monotonic())))
-        for name, _, _ in QUERIES:
-            print("FINRISK_EVIDENCE promql name=%s value=%s" % (name, "none" if values[name] is None else "%g" % values[name]))
-        if missing:
-            sys.exit("promql failed: " + ", ".join(missing))
-        PY
-
-        # The only write. A merge patch replaces the parameter list; the changed source makes Argo CD
-        # refresh and sync at once.
+        # The only write (a merge patch); Argo CD syncs the changed source.
         set_digest() {
           kq -n "$NS" patch applications.argoproj.io "$APP" --type=merge --field-manager=finrisk-digest \
             -p "{\"spec\":{\"source\":{\"helm\":{\"parameters\":[{\"name\":\"image.digest\",\"value\":\"$1\",\"forceString\":true}]}}}}"
         }
-        # One poll: done (0) when converged on digest $1, or failed for it ($failure set); else 1.
+        # One poll: 0 when converged on $1, or failed for it ($failure set); else 1.
         converged() {
           state="$(kq -n "$NS" get "applications.argoproj.io/$APP" "deployment/$APP" "hpa/$APP" --ignore-not-found -o json \
             | python3 /tmp/app.py state "$1")" || return 1
           case "$state" in
             converged*) return 0 ;;
-            sync_failed*|progress_deadline*) failure="$${state%% *}"; return 0 ;;
-            *) return 1 ;;
+            sync_failed*) failure=sync_failed; return 0 ;;
+            # Two polls in a row: a re-patch can briefly show the old deadline.
+            progress_deadline*) [ -z "$late" ] || { failure=progress_deadline; return 0; }; late=1; return 1 ;;
+            *) late=""; return 1 ;;
           esac
         }
-        failure=""
-        # Every step checks its own status: set -e does not apply inside a function used as a condition.
+        failure="" late=""
+        # Every step checks its status: set -e is off in a condition.
         deploy_and_verify() {
           set_digest "$DIGEST" || { failure=patch; return 1; }
           wait_for 480 converged "$DIGEST" || { failure=timeout; return 1; }
           [ -z "$failure" ] || return 1
           echo "FINRISK_EVIDENCE argocd digest=$DIGEST $${state#converged }"
           "$K" -n "$NS" rollout status deployment/"$APP" --timeout=60s || { failure=rollout; return 1; }
-          timeout 90 "$K" -n "$NS" exec -i deploy/"$APP" -c inference -- python - < /tmp/smoke.py || { failure=smoke; return 1; }
+          timeout 90 "$K" -n "$NS" exec -i deploy/"$APP" -c inference -- python - "${model_sha256}" < /tmp/smoke.py || { failure=smoke; return 1; }
+        }
+
+        # Load test: the Job drives the HPA from 1 replica to 2 or more.
+        scaled_up() {  # $hpa: "<current> <desired> <cpu %>"; true at 2+ replicas
+          hpa="$(kq -n "$NS" get hpa "$APP" -o jsonpath='{.status.currentReplicas} {.status.desiredReplicas} {.status.currentMetrics[*].resource.current.averageUtilization}')" \
+            && [[ "$hpa" == [2-9]\ * ]]
+        }
+        show() {
+          read -r c d u <<<"$hpa"
+          [ -z "$start" ] || [ "$${c:-0}" -le "$top" ] || top=$c
+          echo "FINRISK_EVIDENCE hpa phase=$1 current=$${c:-none} desired=$${d:-none} cpu_utilization=$${u:-none}"
+        }
+        gone() { left="$(kq -n "$NS" get jobs,pods -l app.kubernetes.io/name=finrisk-load -o name)" && [ -z "$left" ]; }
+        load_test() {
+          scaled_up; show before
+          [[ "$hpa" == 1\ * ]] || { load=load_not_started; return 1; }
+          sed "s#LOAD_IMAGE#$FINRISK_IMAGE_URI#" /tmp/load-job.yaml | kq -n "$NS" create -f - || { load=load_not_started; return 1; }
+          start="$(date +%s)"
+          wait_for 300 scaled_up && scaled=yes || load=hpa_not_scaled
+          show during
+          [ -z "$load" ] || { kq -n "$NS" get events --sort-by=.lastTimestamp || :; return 1; }
+          timeout 240 "$K" -n "$NS" exec -i deploy/"$APP" -c inference -- python - $(( $(date +%s) - start )) < /tmp/promql.py \
+            || { load=hpa_evidence_failed; return 1; }
         }
 
         if deploy_and_verify; then
           revision="$(kq -n "$NS" get deployment "$APP" -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}')"
           ids="image_uri=$FINRISK_IMAGE_URI revision=$revision argocd_revision=$TARGET_REVISION previous_digest=$PREV_DIGEST"
-          # After the release serves, outside the rollback scope: only its evidence would be missing.
+          # Serving: no rollback from here.
           if ! timeout 240 "$K" -n "$NS" exec -i deploy/"$APP" -c inference -- python - < /tmp/promql.py; then
             echo "FINRISK_EVIDENCE result=observability_failed $ids"
+            exit 1
+          fi
+          # The Job is deleted on every outcome.
+          load="" top=0 start="" scaled=no
+          load_test || :
+          kq -n "$NS" delete job finrisk-load --ignore-not-found --wait=false && wait_for 60 gone && deleted=yes || deleted=no
+          scaled_up || :
+          show after
+          echo "FINRISK_EVIDENCE load job=finrisk-load hpa_scaled=$scaled max_replicas=$top job_deleted=$deleted"
+          [ -n "$load" ] || [ "$deleted" = yes ] || load=load_cleanup_failed
+          if [ -n "$load" ]; then
+            echo "FINRISK_EVIDENCE result=$load $ids"
             exit 1
           fi
           echo "FINRISK_EVIDENCE result=deployed $ids"
         else
           echo "FINRISK_EVIDENCE failure=$failure digest=$DIGEST state=$${state:-none}"
           if [ "$PREV_DIGEST" = none ]; then
-            # No earlier digest and no delete right: the failed first deploy stays for diagnosis until DESTROY.
+            # No earlier digest: the failed first deploy stays until DESTROY.
             echo "FINRISK_EVIDENCE result=first_deploy_retained digest=$DIGEST previous_digest=none"
           elif [ "$PREV_DIGEST" = "$DIGEST" ]; then
             echo "FINRISK_EVIDENCE result=failed digest=$DIGEST previous_digest=$PREV_DIGEST"
           else
-            # Re-patch the digest recorded before the change (rollout undo would be reverted by self-heal).
+            # Re-patch the previous digest (self-heal would revert a rollout undo).
             echo "Re-patching $APP to the previous digest $PREV_DIGEST"
-            failure=""
+            failure="" late=""
             if set_digest "$PREV_DIGEST" && wait_for 300 converged "$PREV_DIGEST" && [ -z "$failure" ] \
                 && "$K" -n "$NS" rollout status deployment/"$APP" --timeout=60s; then
               echo "FINRISK_EVIDENCE result=rolled_back digest=$DIGEST previous_digest=$PREV_DIGEST"

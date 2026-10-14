@@ -3,11 +3,13 @@
 
 Models what the GitOps deploy depends on: the Argo CD Application finrisk/finrisk-inference (spec and
 status, with the per-object sync status of its four chart objects), an Argo CD controller that reacts to
-a changed image.digest parameter one poll at a time, the Deployment and HPA it syncs (as the deploy reads
-them), the deploy runner's authorization, and the two in-pod scripts. The Application starts as the
-bootstrap leaves it (the test writes it into FAKE_STATE). Any call it does not model fails, so a new call in the buildspec
-cannot pass unnoticed; every call that reaches the API server must be bounded: kq's --request-timeout,
-rollout status --timeout, or exec under `timeout` (the stub exports FAKE_TIMEOUT).
+a changed image.digest parameter one poll at a time, the Deployment and HPA it syncs (as the deploy's poll
+reads them), the HPA's status as the load test reads it, the load test's Job, the deploy runner's
+authorization, and the two in-pod scripts (infra/k8s/smoke.py and promql.py, as the buildspec unpacks
+them). The Application starts as the bootstrap leaves it (the test writes it into FAKE_STATE). Any call it
+does not model fails, so a new call in the buildspec cannot pass unnoticed; every call that reaches the API
+server must be bounded: kq's --request-timeout, rollout status --timeout, or exec under `timeout` (the stub
+exports FAKE_TIMEOUT).
 
 Authorization: AmazonEKSEditPolicy in finrisk (no RBAC objects, nothing of Argo CD's) plus the Role of
 infra/k8s/inference-app.yaml (get, watch, patch on applications/finrisk-inference in finrisk). Calls are
@@ -27,7 +29,8 @@ Controller, per poll of the Application after its digest changed (FAKE_CONTROLLE
 The operation is shaped as Argo CD v3.5.3's autoSync builds it (controller/appcontroller.go): sync.source is
 a copy of spec.source, sync.revision the resolved commit, initiatedBy.automated; it is the Application's
 top-level `operation` while it runs, and syncResult.source copies its source (controller/sync.go).
-FAKE_REFRESH_AFTER=n polls before the controller notices the change (default 1). The sync of a digest in
+FAKE_REFRESH_AFTER=n polls before the controller notices the change (default 1); -1: it noticed and synced
+before the build's first poll, so no poll sees the operation Running. The sync of a digest in
 FAKE_SYNC_FAILS fails (operationState Failed, a SyncError). Images whose digest is in FAKE_BAD_IMAGES never
 become ready: Progressing, then the Deployment's ProgressDeadlineExceeded after FAKE_DEADLINE_POLLS polls
 (default 6) and Degraded. FAKE_OBSERVE_LAG=n: the deployment controller observes a changed template n polls
@@ -52,11 +55,26 @@ by kind, or group/Kind/namespace/name for another object (group empty for the co
                               without a result)
   FAKE_MISSING=Kind           that chart object is gone: listed OutOfSync, the health still Healthy (Argo CD
                               3.4+ ignores missing objects, and keeps no per-object health in the Application
-                              by default); without the ServiceMonitor, Prometheus has no target for the app
+                              by default); without the ServiceMonitor, Prometheus has no target for the app;
+                              without the HPA, the load test's read of it finds none
   FAKE_DRIFT=previous         something else keeps the Deployment on the previous image: the Application
                               alternates OutOfSync (the Deployment listed) and Synced
 
-exec runs the piped script with Python (python -I -S, the standard library only, as in the image):
+The load test: the HPA finrisk/finrisk-inference (kubectl get hpa) and the Job finrisk-load, which the
+deploy may create (from stdin, one Job only) and delete. Pod Security restricted is enforced on the Job's
+Pod template (infra/tests/pod_security.py): a Job whose Pod it rejects is created, but runs no Pod, as the
+Job controller's FailedCreate. While a Job runs Pods, each HPA read advances the HPA (FAKE_HPA):
+  scales (default)  current 1 for FAKE_HPA_AFTER reads (default 2), then desired 3, then current 3
+  never             current and desired stay 1 under load (CPU below target)
+  at-two            the HPA is already at 2 replicas before any load
+FAKE_JOB: create-fails (Forbidden) | exists (a Job of that name is left over) | delete-fails (Forbidden) |
+stuck (its Pod never terminates) | list-fails (listing Jobs and Pods times out). A deleted Job's Pod is gone
+after one more read. A list by label (-l key=value) shows the Job by its own labels and its Pod by the Pod
+template's, as the API server selects them. The namespace's events answer what the Job and the HPA did (for
+the build's diagnosis of a failed load test).
+
+exec runs the piped script with Python (python -I -S, the standard library only, as in the image), with
+the arguments after `python -`:
   - a script with a BASE line (the smoke test) against a stand-in for the inference API
     (src/finrisk/serving.py) on the chart's Service; FAKE_SMOKE breaks one thing:
       wrong-sha          every endpoint reports another model (the image carries the wrong artifact)
@@ -68,6 +86,18 @@ exec runs the piped script with Python (python -I -S, the standard library only,
   - a script with a PROMETHEUS line (the PromQL evidence) against a stand-in for the Prometheus query
     API, on a fake clock; its answers follow the predictions the smoke test made. FAKE_PROM:
       ok (default) | app-down | no-ksm | unscraped (no app series) | unreachable
+    Over the load interval ([<n>s] of kube-state-metrics' own series, job="kube-state-metrics"), it shows
+    the HPA's largest current and desired replicas while the Job ran, and the app 80 successful
+    predictions/s (the Job's rate) while its Pod runs. Each n is recorded with the true load interval at that
+    query (the build's clock since the Job was created plus the script's own fake clock, which it passes
+    along with each query). A window reaching back before the Job sees an earlier load test's scale-out
+    (3 replicas) still in Prometheus. FAKE_PROM_LOAD: ok (default) | ksm-unscaled (no scale-up scraped) |
+    outage (no replica available for a moment) | no-requests (no successful prediction)
+
+FAKE_STALE_DEADLINE: after a template change the Deployment reports it observed (observedGeneration
+current) but can still show the previous rollout's Progressing condition, as the deployment controller can
+for a moment after a re-patch: a comma list with one 1 or 0 per read from the change on, 1 where that read
+shows the previous condition ("1": the first read only; "1,0,1": the first and third).
 """
 import copy
 import json
@@ -79,6 +109,12 @@ import sys
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from pod_security import restricted  # noqa: E402
 
 STATE = os.environ["FAKE_STATE"]
 state = json.load(open(STATE))
@@ -87,6 +123,8 @@ state.setdefault("deployment", None)
 state.setdefault("requests", 0)
 state.setdefault("progress", 0)
 state.setdefault("polls", 0)
+state.setdefault("job", None)
+state.setdefault("hpa", {"current": 1, "desired": 1, "reads": 0, "max_current": 1, "max_desired": 1})
 args = sys.argv[1:]
 state["calls"].append(" ".join(args))
 env = os.environ.get
@@ -97,6 +135,8 @@ SERVICES = {"finrisk-inference.finrisk": {"80": True}}
 CONTAINERS = ["inference"]
 FEATURES = ["debt_to_assets", "current_ratio", "return_on_assets", "log_market_cap"]
 OTHER_SHA = "0" * 64
+HPA_JSONPATH = ("jsonpath={.status.currentReplicas} {.status.desiredReplicas} "
+                "{.status.currentMetrics[*].resource.current.averageUtilization}")
 NOT_LOADED = {"detail": "Model artifact not found: /app/model/boosted_tree_model.joblib"}
 
 
@@ -117,7 +157,7 @@ namespace, output, patch, positional, flags, i = "default", "", None, [], [], 0
 command_end = args.index("--") if "--" in args else len(args)
 while i < command_end:
     a = args[i]
-    if a in ("-n", "--namespace", "-o", "-p", "-c"):
+    if a in ("-n", "--namespace", "-o", "-p", "-c", "-f", "-l"):
         if a in ("-n", "--namespace"):
             namespace = args[i + 1]
         elif a == "-o":
@@ -125,7 +165,7 @@ while i < command_end:
         elif a == "-p":
             patch = args[i + 1]
         else:
-            flags.append(f"-c={args[i + 1]}")
+            flags.append(f"{a}={args[i + 1]}")
         i += 2
         continue
     (flags if a.startswith("-") else positional).append(a)
@@ -210,6 +250,8 @@ def tick():
     dep = state["deployment"]
     if dep and dep.get("lag"):
         dep["lag"] -= 1
+    if dep and dep.get("stale"):
+        dep["stale"].pop(0)
     if want is None or mode == "frozen":
         return
     synced = digest_of(((status.get("operationState") or {}).get("syncResult") or {}).get("source"))
@@ -236,7 +278,9 @@ def tick():
         status["operationState"] = {"phase": "Running", "operation": operation}
         status["health"] = {"status": "Progressing"}
         return
-    operation = (status.get("operationState") or {}).get("operation") or operation
+    current = status.get("operationState") or {}
+    # The running operation completes; one that started and completed between two polls is this new one.
+    operation = current["operation"] if current.get("phase") == "Running" else operation
     app.pop("operation", None)  # a completed operation is cleared (setOperationState)
     result = {"revision": revision, "source": copy.deepcopy(operation["sync"]["source"])}
     if want in env("FAKE_SYNC_FAILS", "").split(","):
@@ -253,7 +297,8 @@ def tick():
     elif dep["image"] != image:
         # The template changes now; the deployment controller observes it FAKE_OBSERVE_LAG polls later.
         dep.update(image=image, previous=dep["image"], revision=dep["revision"] + 1, since=step, generation=dep.get("generation", 1) + 1,
-                   lag=int(env("FAKE_OBSERVE_LAG", "0")), shown=progressing(dep), deadline=False)
+                   lag=int(env("FAKE_OBSERVE_LAG", "0")), stale=[r == "1" for r in env("FAKE_STALE_DEADLINE", "").split(",") if r],
+                   shown=progressing(dep), deadline=False)
     status["summary"] = {"images": [image]}
     bad = want in set(filter(None, env("FAKE_BAD_IMAGES", "").split(",")))
     age = step - dep["since"]
@@ -284,12 +329,13 @@ def workload():
     dep = state["deployment"]
     generation, lag = dep.get("generation", 1), dep.get("lag", 0)
     meta = {"name": APP, "namespace": NS}
+    shown = dep["shown"] if lag or (dep.get("stale") or [False])[0] else progressing(dep)
     return [{"apiVersion": "apps/v1", "kind": "Deployment", "metadata": dict(meta, generation=generation,
              annotations={"deployment.kubernetes.io/revision": str(dep["revision"])}),
              "spec": {"replicas": 1, "template": {"spec": {"containers": [{"name": c, "image": dep["image"]} for c in CONTAINERS]}}},
              "status": {"observedGeneration": generation - 1 if lag else generation, "replicas": 1, "updatedReplicas": 1,
                         "availableReplicas": ready(), "readyReplicas": ready(),
-                        "conditions": [{"type": "Progressing", "reason": dep["shown"] if lag else progressing(dep)}]}},
+                        "conditions": [{"type": "Progressing", "reason": shown}]}},
             {"apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler", "metadata": meta,
              "spec": {"minReplicas": 1, "maxReplicas": 3}, "status": {"currentReplicas": 1}}]
 
@@ -371,6 +417,55 @@ def skew(app, items):
     }[name]()
 
 
+def clock():
+    """The build's fake clock (the date and sleep stubs keep it), or 0 outside the runtime test."""
+    return int(Path(env("FAKE_CLOCK")).read_text()) if env("FAKE_CLOCK") else 0
+
+
+# --- load test ----------------------------------------------------------------------------------------
+def running():
+    job = state["job"] or {}
+    return bool(job.get("pods")) and not job.get("deleted")
+
+
+def hpa_read():
+    """One read of the HPA's status: "<current> <desired> <cpu %>", advanced while the load Job runs."""
+    hpa, mode = state["hpa"], env("FAKE_HPA", "scales")
+    if mode == "at-two":
+        hpa.update(current=max(hpa["current"], 2), desired=max(hpa["desired"], 2))
+    if running() and mode == "scales":
+        hpa["reads"] += 1
+        after = int(env("FAKE_HPA_AFTER", "2"))
+        if hpa["reads"] == after:
+            hpa["desired"] = 3
+        elif hpa["reads"] > after:
+            hpa["current"] = hpa["desired"] = 3
+    hpa["max_current"], hpa["max_desired"] = max(hpa["max_current"], hpa["current"]), max(hpa["max_desired"], hpa["desired"])
+    cpu = (45 if mode == "never" else 240 // hpa["current"]) if running() else 3
+    return f'{hpa["current"]} {hpa["desired"]} {cpu}'
+
+
+def create_job(text):
+    """kubectl create -f - of the load Job; Pod Security restricted decides whether its Pod can run."""
+    docs = [d for d in yaml.safe_load_all(text) if d]
+    if [d.get("kind") for d in docs] != ["Job"] or docs[0]["metadata"].get("name") != "finrisk-load" \
+            or docs[0]["metadata"].get("namespace", NS) != NS:
+        unsupported()
+    if not allowed("create", "jobs.batch", "", namespace) or env("FAKE_JOB") == "create-fails":
+        forbidden("create", "jobs.batch")
+    labels = {"labels": docs[0]["metadata"].get("labels") or {}, "pod_labels": docs[0]["spec"]["template"].get("metadata", {}).get(
+        "labels") or {}}
+    if env("FAKE_JOB") == "exists" and not state["job"]:
+        state["job"] = {"image": "left over by an earlier build", "pods": 1, "created": clock(), **labels}
+    if state["job"] and not state["job"].get("gone"):
+        done(1, err='Error from server (AlreadyExists): jobs.batch "finrisk-load" already exists\n')
+    template = docs[0]["spec"]["template"]
+    admitted = all(restricted(template).values())
+    state["job"] = {"image": template["spec"]["containers"][0]["image"], "pods": int(admitted), "created": clock(),
+                    "spec": docs[0]["spec"], **labels}
+    done(out="job.batch/finrisk-load created\n")
+
+
 def merge(target, change):
     """RFC 7386 JSON merge patch: objects merge, everything else (lists too) replaces, null removes."""
     for key, value in change.items():
@@ -450,11 +545,15 @@ class PrometheusApi(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
-    def answer(self, query):
+    def answer(self, query, now):
         served = state["requests"]
         app = 'service="finrisk-inference"' in query or "http_target" in query or "finrisk_" in query
         if self.scenario == "unscraped" and app:
             return None
+        if re.search(r"\[(\d+)s\]\)\)$", query):
+            return self.over_load_interval(query, now)
+        if query.startswith("sum(rate(http_server_duration_milliseconds_count{") and 'http_status_code="200"}[1m]))' in query:
+            return 80 if running() and env("FAKE_PROM_LOAD") != "no-requests" else 0
         if query.startswith("min(up{") and 'service="finrisk-inference"' in query:
             return 0 if self.scenario == "app-down" else 1
         if query == 'min(up{job="kube-state-metrics"})':
@@ -465,9 +564,31 @@ class PrometheusApi(BaseHTTPRequestHandler):
             return served
         if query.startswith("histogram_quantile(0.95,"):
             return 20.5 if served else "NaN"
-        if query.startswith(("kube_deployment_status_replicas_available{", "kube_horizontalpodautoscaler_status_current_replicas{")):
+        if query in (KSM % ("deployment_status_replicas_available", "deployment"),
+                     KSM % ("horizontalpodautoscaler_status_current_replicas", "horizontalpodautoscaler")):
             return None if self.scenario == "no-ksm" else 1
         return None
+
+    def over_load_interval(self, query, now):
+        """kube-state-metrics over [<n>s]: the HPA as the load drove it, replicas available throughout; a
+        window reaching back before the Job also holds an earlier load test's 3 replicas."""
+        hpa, mode = state["hpa"], env("FAKE_PROM_LOAD", "ok")
+        series = {("horizontalpodautoscaler_status_current_replicas", "horizontalpodautoscaler"):
+                  1 if mode == "ksm-unscaled" else hpa["max_current"],
+                  ("horizontalpodautoscaler_status_desired_replicas", "horizontalpodautoscaler"):
+                  1 if mode == "ksm-unscaled" else hpa["max_desired"],
+                  ("deployment_status_replicas_available", "deployment"): hpa["max_current"]}
+        m = re.fullmatch(r"(max|min)\(\1_over_time\((.*)\[(\d+)s\]\)\)", query)
+        found = next((key for key in series if m and m[2] == KSM % key), None)
+        if not found:
+            return None
+        # The true load interval at this query: the build's seconds since the Job was created, plus the
+        # script's own time since it started.
+        interval = LOAD["base"] + now
+        state.setdefault("windows", []).append([int(m[3]), interval])
+        if m[1] == "min":
+            return 0 if mode == "outage" else 1
+        return max(series[found], 3) if int(m[3]) > interval + 1 else series[found]
 
     def do_GET(self):
         url = urllib.parse.urlsplit(self.path)
@@ -475,7 +596,8 @@ class PrometheusApi(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
-        value = self.answer(urllib.parse.parse_qs(url.query)["query"][0])
+        params = urllib.parse.parse_qs(url.query)
+        value = self.answer(params["query"][0], float(params.get("fake_now", ["0"])[0]))
         result = [] if value is None else [{"metric": {}, "value": [1.7e9, str(value)]}]
         data = json.dumps({"status": "success", "data": {"resultType": "vector", "result": result}}).encode()
         self.send_response(200)
@@ -484,11 +606,17 @@ class PrometheusApi(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
-# The PromQL script's clock: sleep advances it, so its polling bound is exercised without waiting.
-FAKE_CLOCK = "import time as _t\n_now = [0.0]\n_t.monotonic = lambda: _now[0]\n_t.sleep = lambda s: _now.__setitem__(0, _now[0] + s)\n"
+# The PromQL script's clock: sleep advances it, so its polling bound is exercised without waiting. Each
+# query carries the script's time (fake_now) for the stand-in to check the load interval's window against.
+FAKE_CLOCK = ("import time as _t\n_now = [0.0]\n_t.monotonic = lambda: _now[0]\n_t.sleep = lambda s: _now.__setitem__(0, _now[0] + s)\n"
+              "import urllib.request as _u\n_open = _u.urlopen\n"
+              "_u.urlopen = lambda url, *a, **k: _open(url + '&fake_now=%r' % _now[0], *a, **k)\n")
+# kube-state-metrics' series for the release, as its scrape job labels them.
+KSM = 'kube_%s{job="kube-state-metrics",namespace="finrisk",%s="finrisk-inference"}'
+LOAD = {"base": 0}
 
 
-def run_in_pod(script):
+def run_in_pod(script, argv):
     """Runs a piped in-pod script against the stand-in its address line names; anything else is refused."""
     base = re.search(r'^BASE = "(.*)"$', script, re.M)
     prometheus = re.search(r'^PROMETHEUS = "(.*)"$', script, re.M)
@@ -507,6 +635,9 @@ def run_in_pod(script):
         reachable = url.scheme == "http" and url.netloc == PROMETHEUS and not url.path and env("FAKE_PROM") != "unreachable"
         handler = PrometheusApi
         script = FAKE_CLOCK + script
+        if argv:  # the load test's window: the seconds since the Job was created, by the build's clock
+            LOAD["base"] = clock() - (state["job"] or {}).get("created", clock())
+            state.setdefault("load_args", []).append((argv, LOAD["base"]))
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
     try:
@@ -515,7 +646,7 @@ def run_in_pod(script):
         # No proxy may see the request; no_proxy=* also stops urllib using macOS system proxies.
         run_env = {k: v for k, v in os.environ.items() if not k.lower().endswith("_proxy")}
         run_env["no_proxy"] = "*"
-        result = subprocess.run([sys.executable, "-I", "-S", "-"], input=script, env=run_env, capture_output=True,
+        result = subprocess.run([sys.executable, "-I", "-S", "-", *argv], input=script, env=run_env, capture_output=True,
                                 text=True, timeout=120)
     finally:
         server.shutdown()
@@ -577,7 +708,7 @@ if positional == ["rollout", "status", f"deployment/{APP}"] and namespace == NS:
     if not ready():
         done(1, err="error: timed out waiting for the condition\n")
     done(out=f'deployment "{APP}" successfully rolled out\n')
-if verb == "exec" and args[command_end + 1:] == ["python", "-"]:
+if verb == "exec" and args[command_end + 1:command_end + 3] == ["python", "-"]:
     target = next((p for p in positional if p.startswith("deploy/")), "")
     if namespace != NS or target != f"deploy/{APP}" or state["deployment"] is None:
         done(1, err=f'Error from server (NotFound): deployments.apps "{target.split("/")[-1]}" not found\n')
@@ -589,5 +720,49 @@ if verb == "exec" and args[command_end + 1:] == ["python", "-"]:
         done(1, err=f"Error from server (BadRequest): container {container} is not valid for pod {APP}-6d4f8b9c7-x2k9p\n")
     if "-i" not in flags and "--stdin" not in flags:
         done(0)
-    run_in_pod(sys.stdin.read())
+    run_in_pod(sys.stdin.read(), args[command_end + 3:])
+if positional == ["get", "hpa", APP] and namespace == NS and output == HPA_JSONPATH:
+    if not allowed("get", "hpa", APP, namespace):
+        forbidden("get", "horizontalpodautoscalers.autoscaling", APP)
+    synced = ((state["app"].get("status") or {}).get("operationState") or {}).get("syncResult") or {}
+    missing = env("FAKE_MISSING") == "HorizontalPodAutoscaler" and digest_of(synced.get("source")) == env("FAKE_SKEW_DIGEST")
+    if state["deployment"] is None or missing:
+        done(1, err=f'Error from server (NotFound): horizontalpodautoscalers.autoscaling "{APP}" not found\n')
+    done(out=hpa_read())
+if positional == ["create"] and option("-f") == "-":
+    create_job(sys.stdin.read())
+if positional == ["delete", "job", "finrisk-load"] and namespace == NS and {"--ignore-not-found", "--wait=false"} <= set(flags):
+    if not allowed("delete", "jobs.batch", "finrisk-load", namespace) or env("FAKE_JOB") == "delete-fails":
+        forbidden("delete", "jobs.batch", "finrisk-load")
+    job = state["job"]
+    if not job or job.get("deleted") or job.get("gone"):
+        done()
+    job["deleted"] = True
+    done(out='job.batch "finrisk-load" deleted\n')
+if positional == ["get", "events"] and namespace == NS and option("--sort-by") == ".lastTimestamp":
+    # The load test's diagnosis when it fails: why the Job runs no Pod, or what the HPA saw.
+    job = state["job"] or {}
+    events = ["Warning  FailedCreate  job/finrisk-load  Error creating: pods \"finrisk-load-7xk2p\" is forbidden: "
+              "violates PodSecurity \"restricted:latest\"" if job and not job.get("pods") else
+              "Normal  SuccessfulCreate  job/finrisk-load  Created pod: finrisk-load-7xk2p" if job else ""]
+    events.append("Normal  SuccessfulRescale  horizontalpodautoscaler/finrisk-inference  New size: 3"
+                  if state["hpa"]["max_current"] > 1 else "")
+    done(out="LAST SEEN  TYPE  REASON  OBJECT  MESSAGE\n" + "".join(e + "\n" for e in events if e))
+if positional == ["get", "jobs,pods"] and namespace == NS and re.fullmatch(r"[\w./-]+=[\w.-]+", option("-l") or "") \
+        and output == "name":
+    if env("FAKE_JOB") == "list-fails":
+        done(1, err="Unable to connect to the server: net/http: request canceled (Client.Timeout exceeded while awaiting headers)\n")
+    job = state["job"]
+    if not job or job.get("gone"):
+        done()
+    key, _, value = option("-l").partition("=")
+    pod = "pod/finrisk-load-7xk2p\n" if job.get("pods") and job.get("pod_labels", {}).get(key) == value else ""
+    if not job.get("deleted"):
+        done(out=("job.batch/finrisk-load\n" if job.get("labels", {}).get(key) == value else "") + pod)
+    # The Job object goes at once; its Pod terminates by the next read (never, when stuck).
+    job["reads"] = job.get("reads", 0) + 1
+    if env("FAKE_JOB") != "stuck" and (job["reads"] > 1 or not job.get("pods")):
+        job["gone"] = True
+        done()
+    done(out=pod)
 unsupported()
