@@ -1,7 +1,7 @@
 # Pod Security "restricted" at the latest version, which includes "baseline": the checks in
 # k8s.io/pod-security-admission/policy (v1.35), for one Pod template. Stricter than admission only for
 # hostUsers: false, where it allows root inside the Pod's user namespace. Shared by test_eks_foundation.py
-# (infra/k8s/inference.yaml) and check_inference_chart.py (the rendered chart).
+# (the chart's Pod template, without helm) and the check_*.py scripts (rendered charts).
 RESTRICTED_VOLUMES = {"configMap", "csi", "downwardAPI", "emptyDir", "ephemeral", "image", "persistentVolumeClaim",
                       "projected", "secret"}
 PROFILES = {"RuntimeDefault", "Localhost"}  # seccomp and AppArmor

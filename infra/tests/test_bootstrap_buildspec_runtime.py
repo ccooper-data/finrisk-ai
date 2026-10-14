@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # Executes the rendered bootstrap buildspec against a stateful fake API (fakes/cluster.py, standing in
 # for kubectl and helm) to check its control flow end to end: the checksums of downloads and embedded
-# files before use, the order of the add-ons, the exposure guard's live proof, every fail-closed
-# check (each with a scenario that trips it), the bounded waits and their request timeouts, and the
-# evidence lines. Time is a fake clock that only `sleep` advances, so each wait's bound is exercised
+# files before use, the order of the add-ons, the exposure guard's live proof, the inference Application
+# at the PLAN's commit, every fail-closed check (each with a scenario that trips it), the bounded waits
+# and their request timeouts, and the evidence lines. Time is a fake clock that only `sleep` advances, so each wait's bound is exercised
 # exactly and fast. The embedded infra/k8s files are rendered as Terraform would (base64 of gzip,
 # with their sha256).
 import base64
@@ -29,7 +29,10 @@ K8S = ROOT / "infra/k8s"
 BUILD_TIMEOUT = int(re.search(r'resource "aws_codebuild_project" "k8s_bootstrap" \{.*?build_timeout\s+= (\d+)',
                               (ROOT / "infra/terraform/deploy_path.tf").read_text(), re.S)[1])
 EMBEDDED = {"cluster_guards": "cluster-guards.yaml", "argocd_values": "argocd-values.yaml",
-            "argocd_projects": "argocd-projects.yaml", "monitoring_app": "monitoring-app.yaml"}
+            "argocd_projects": "argocd-projects.yaml", "monitoring_app": "monitoring-app.yaml",
+            "inference_app": "inference-app.yaml"}
+REVISION = "0123456789abcdef0123456789abcdef01234567"
+REPOSITORY = "780976819607.dkr.ecr.us-east-1.amazonaws.com/finrisk-ai-inference"
 URLS = {"kubectl": "https://dl.k8s.io/release/v1.35.9/bin/linux/amd64/kubectl",
         "helm": "https://get.helm.sh/helm-v4.3.0-linux-amd64.tar.gz",
         "argocd_chart": "https://github.com/argoproj/argo-helm/releases/download/argo-cd-10.9.6/argo-cd-10.9.6.tgz"}
@@ -47,6 +50,7 @@ def render(**override):
     values = {"cluster_name": "finrisk-ai-portfolio", "region": "us-east-1", "namespace": "finrisk",
               "argocd_namespace": "argocd", "monitoring_namespace": "monitoring", "node_instance_type": "t3.large",
               "kubectl_version": "v1.35.9", "helm_version": "v4.3.0", "argocd_chart_version": "10.9.6",
+              "gitops_revision": REVISION, "image_repository": REPOSITORY,
               **{f"{k}_sha256": sha(u.encode()) for k, u in URLS.items()}}
     for name, file in EMBEDDED.items():
         values[f"{name}_sha256"] = sha((K8S / file).read_bytes())
@@ -108,6 +112,7 @@ def verified_before_use(log):
 
 
 HELM = "helm upgrade --install argocd"
+GITOPS = "kubectl apply --server-side --field-manager=finrisk-bootstrap --force-conflicts -f tmp/finrisk/gitops.yaml"
 PROJECTS = "kubectl apply --server-side --field-manager=finrisk-bootstrap --force-conflicts -f tmp/finrisk/argocd-projects.yaml"
 DRY_RUN = "kubectl --request-timeout=10s -n finrisk create --dry-run=server"
 checks = {}
@@ -162,13 +167,16 @@ try:
         **{name: env for name, (env, _) in argocd_drift.items()}, "monitoring-never": {"FAKE_MONITORING": "never"},
         **{"monitoring-" + m: {"FAKE_MONITORING": m} for m in ("degraded", "outofsync", "healthy-running", "degraded-succeeded")},
         "lifecycle": {"FAKE_LIFECYCLE": "1"}, "unpinned-monitoring": {"FAKE_UNPINNED": "monitoring"}, "no-ksm": {"FAKE_NO_KSM": "1"},
-        "repo-oom": {"FAKE_REPO_OOM": "1"}, "no-top": {"FAKE_NO_TOP": "1"},
+        "repo-oom": {"FAKE_REPO_OOM": "1"}, "no-top": {"FAKE_NO_TOP": "1"}, "gitops-drift": {"FAKE_GITOPS_DRIFT": "1"},
+        "unset-revision": {}, "tampered-app": {},
     }
     # Deliberately broken buildspecs: an embedded file that differs from its plan-time sha256, downloads
     # used without their checksum, and polled kubectl calls without a request timeout.
     fetch_check = '  echo "$3  $1" | sha256sum --check --strict\n'
     kq = 'kq() { "$K" --request-timeout=10s "$@"; }'
     scripts = {"tampered": render(monitoring_app_sha256=sha(b"something else")),
+               "tampered-app": render(inference_app_sha256=sha(b"something else")),
+               "unset-revision": render(gitops_revision="unset"),
                "unverified": default.replace(fetch_check, "", 1) if fetch_check in default else "exit 99",
                "no-request-timeout": default.replace(kq, 'kq() { "$K" "$@"; }', 1) if kq in default else "exit 99"}
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -179,8 +187,16 @@ try:
     calls = state["calls"]
     checks["installs everything and ends with bootstrap=complete"] = code == 0 and bool(lines) \
         and lines[-1] == "bootstrap=complete namespace=finrisk"
-    checks["evidence: node, guard, argocd, monitoring, then the terminal line"] = [l.split()[0] for l in lines] \
-        == ["node", "guard", "argocd", "monitoring", "bootstrap=complete"]
+    checks["evidence: node, guard, argocd, monitoring, gitops, then the terminal line"] = [l.split()[0] for l in lines] \
+        == ["node", "guard", "argocd", "monitoring", "gitops", "bootstrap=complete"]
+    checks["gitops evidence: the inference Application at the PLAN's commit, no digest yet (ComparisonError)"] = \
+        f"gitops app=finrisk/finrisk-inference project=finrisk target_revision={REVISION} image_repository={REPOSITORY} " \
+        "conditions=ComparisonError" in lines
+    # The applied objects are inference-app.yaml with the two values in place, and nothing else changed.
+    applied = (state.get("gitops") or {}).get("text", "")
+    expected = (K8S / "inference-app.yaml").read_text().replace("GITOPS_REVISION", REVISION).replace("IMAGE_REPOSITORY", REPOSITORY)
+    checks["the inference Application is applied with the PLAN's commit and repository in place of the placeholders"] = \
+        applied == expected and "GITOPS_REVISION" not in applied and "IMAGE_REPOSITORY" not in applied
     checks["node evidence: the planned type and its allocatable capacity"] = bool(lines) and lines[0] \
         == "node count=1 instance_type=t3.large allocatable_pods=35 allocatable_cpu=1930m allocatable_memory=7268356Ki"
     checks["guard evidence: LoadBalancer, externalIPs, Ingress and PVC denied by the policy, ClusterIP admitted"] = \
@@ -202,8 +218,9 @@ try:
     order = ["kubectl label namespace monitoring", "kubectl apply --server-side --field-manager=finrisk-bootstrap "
              "--force-conflicts -f tmp/finrisk/cluster-guards.yaml", DRY_RUN, "helm list --namespace argocd --pending",
              HELM, PROJECTS, "kubectl apply --server-side --field-manager=finrisk-bootstrap --force-conflicts "
-             "-f tmp/finrisk/monitoring-app.yaml", "kubectl --request-timeout=10s get --raw"]
-    checks["order: namespaces, guard and its proof, Argo CD, projects, monitoring, then the Prometheus query"] = \
+             "-f tmp/finrisk/monitoring-app.yaml", "kubectl --request-timeout=10s get --raw", GITOPS,
+             "kubectl --request-timeout=10s -n finrisk get applications.argoproj.io finrisk-inference"]
+    checks["order: namespaces, guard and its proof, Argo CD, projects, monitoring, the Prometheus query, then the inference Application"] = \
         [first(calls, p) for p in order] == sorted(first(calls, p) for p in order) and all(first(calls, p) < len(calls) for p in order)
     checks[f"waits within build_timeout on the fake clock ({seconds} s)"] = code == 0 and seconds < BUILD_TIMEOUT * 60
     baseline = seconds
@@ -241,6 +258,19 @@ try:
     code, out, state, _ = runs["tampered"]
     checks["an embedded file that differs from its sha256 stops before anything reaches the cluster"] = code != 0 \
         and "monitoring-app.yaml: FAILED" in out and set(state["calls"]) <= {"kubectl version --client", "helm version"}
+
+    code, out, state, _ = runs["tampered-app"]
+    checks["an inference Application that differs from its sha256 stops before anything reaches the cluster"] = code != 0 \
+        and "inference-app.yaml: FAILED" in out and set(state["calls"]) <= {"kubectl version --client", "helm version"}
+
+    code, out, state, _ = runs["unset-revision"]
+    checks["an unset gitops revision is refused before any download or cluster call"] = code == 1 \
+        and "gitops revision refused: unset" in out and not state["calls"] and not state["log"]
+
+    code, out, state, _ = runs["gitops-drift"]
+    checks["an inference Application that reads back differently stops before bootstrap=complete"] = code == 1 \
+        and "finrisk-inference is not the reviewed Application" in out and "bootstrap=" not in out \
+        and "FINRISK_EVIDENCE gitops" not in out
 
     code, out, state, _ = runs["unverified"]
     checks["negative control: a download used without its checksum is caught"] = code == 0 and not verified_before_use(state["log"])

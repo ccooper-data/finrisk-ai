@@ -3,8 +3,11 @@
 # GitHub-hosted runners cannot reach the private endpoint, so two CodeBuild projects run inside
 # the private subnets with fixed, reviewed buildspecs:
 #   - k8s-bootstrap: AmazonEKSClusterAdminPolicy (cluster scope); creates the namespaces and the
-#                    exposure guard, installs Argo CD and has it sync the lean Prometheus stack.
-#   - k8s-deploy:    AmazonEKSEditPolicy scoped to the app namespace; applies, verifies, rolls back.
+#                    exposure guard, installs Argo CD, has it sync the lean Prometheus stack, and
+#                    creates the inference Application at the PLAN's commit (gitops_revision).
+#   - k8s-deploy:    AmazonEKSEditPolicy scoped to the app namespace, plus the Kubernetes group
+#                    finrisk-digest-writer; sets the image digest on that Application, verifies the
+#                    rollout and the Prometheus evidence, re-patches the previous digest on failure.
 # The GitHub release role may only start these builds; it cannot edit them (see
 # docs/aws-release-policy.json). Every value in both buildspecs is known at PLAN, so the reviewed
 # plan text shows them in full (infra/tests/test_eks_deploy_path.py).
@@ -38,7 +41,17 @@ locals {
   # The infra/k8s files the bootstrap applies, embedded as one compressed bundle (a "#==> <file>"
   # line before each); the build checks every file against its own sha256, shown in the plan.
   k8s_manifests       = "${path.module}/../k8s"
-  k8s_bootstrap_files = ["cluster-guards.yaml", "argocd-values.yaml", "argocd-projects.yaml", "monitoring-app.yaml"]
+  k8s_bootstrap_files = ["cluster-guards.yaml", "argocd-values.yaml", "argocd-projects.yaml", "monitoring-app.yaml", "inference-app.yaml"]
+
+  # GitOps: Argo CD renders the chart at the PLAN's commit ("unset", which both builds refuse, when
+  # PLAN passed none). The image repository is spelled out from known values, never repository_url,
+  # so the buildspecs stay known at PLAN. The group must match docs/aws-deployer-deploy-path-policy.json.
+  gitops_revision         = coalesce(var.gitops_revision, "unset")
+  gitops_repo_url         = "https://github.com/${var.github_repository}.git"
+  gitops_chart_path       = "charts/finrisk-inference"
+  k8s_digest_writer_group = "finrisk-digest-writer"
+  inference_repository    = "${local.account_id}.dkr.ecr.${var.aws_region}.amazonaws.com/${aws_ecr_repository.inference.name}"
+  prometheus_url          = "http://monitoring-prometheus.${local.k8s_monitoring_namespace}.svc.cluster.local:9090"
 
   served_model = jsondecode(file("${path.module}/../../model/served-model.json"))
 
@@ -200,7 +213,7 @@ resource "aws_codebuild_project" "k8s_bootstrap" {
   count = var.enable_eks ? 1 : 0
 
   name                   = local.k8s_bootstrap_project
-  description            = "Installs the namespaces, exposure guard, Argo CD and the lean Prometheus stack on the private EKS cluster"
+  description            = "Installs the namespaces, exposure guard, Argo CD, the lean Prometheus stack and the inference Application on the private EKS cluster"
   service_role           = aws_iam_role.codebuild_bootstrap[0].arn
   build_timeout          = 25
   queued_timeout         = 10
@@ -239,6 +252,9 @@ resource "aws_codebuild_project" "k8s_bootstrap" {
       argocd_values_sha256   = filesha256("${local.k8s_manifests}/argocd-values.yaml")
       argocd_projects_sha256 = filesha256("${local.k8s_manifests}/argocd-projects.yaml")
       monitoring_app_sha256  = filesha256("${local.k8s_manifests}/monitoring-app.yaml")
+      inference_app_sha256   = filesha256("${local.k8s_manifests}/inference-app.yaml")
+      gitops_revision        = local.gitops_revision
+      image_repository       = local.inference_repository
     })
   }
 
@@ -263,7 +279,7 @@ resource "aws_codebuild_project" "k8s_deploy" {
   count = var.enable_eks ? 1 : 0
 
   name                   = local.k8s_deploy_project
-  description            = "Deploys the digest-pinned inference image to the ${local.k8s_app_namespace} namespace"
+  description            = "Sets the digest-pinned inference image on the Argo CD Application in the ${local.k8s_app_namespace} namespace and verifies it"
   service_role           = aws_iam_role.codebuild_deploy[0].arn
   build_timeout          = 30
   queued_timeout         = 10
@@ -290,16 +306,20 @@ resource "aws_codebuild_project" "k8s_deploy" {
   source {
     type = "NO_SOURCE"
     buildspec = templatefile("${path.module}/deploy/deploy-buildspec.yml.tftpl", {
-      cluster_name    = local.k8s_cluster_name
-      region          = var.aws_region
-      account_id      = local.account_id
-      repository      = aws_ecr_repository.inference.name
-      namespace       = local.k8s_app_namespace
-      app             = local.k8s_app_name
-      kubectl_version = local.kubectl_version
-      kubectl_sha256  = local.kubectl_sha256
-      model_sha256    = local.served_model.sha256
-      manifest_b64    = base64encode(file("${path.module}/../k8s/inference.yaml"))
+      cluster_name     = local.k8s_cluster_name
+      region           = var.aws_region
+      account_id       = local.account_id
+      repository       = aws_ecr_repository.inference.name
+      namespace        = local.k8s_app_namespace
+      argocd_namespace = local.k8s_argocd_namespace
+      app              = local.k8s_app_name
+      kubectl_version  = local.kubectl_version
+      kubectl_sha256   = local.kubectl_sha256
+      model_sha256     = local.served_model.sha256
+      gitops_revision  = local.gitops_revision
+      repo_url         = local.gitops_repo_url
+      chart_path       = local.gitops_chart_path
+      prometheus_url   = local.prometheus_url
     })
   }
 
@@ -352,6 +372,9 @@ resource "aws_eks_access_entry" "k8s_deploy" {
   cluster_name  = aws_eks_cluster.platform[0].name
   principal_arn = aws_iam_role.codebuild_deploy[0].arn
   type          = "STANDARD"
+  # Bound by the bootstrap's Role to get, watch and patch the one Application (infra/k8s/inference-app.yaml).
+  # Sent in CreateAccessEntry; the deployer has no UpdateAccessEntry, and every window plans from empty.
+  kubernetes_groups = [local.k8s_digest_writer_group]
 
   lifecycle {
     replace_triggered_by = [aws_iam_role.codebuild_deploy[0].unique_id]

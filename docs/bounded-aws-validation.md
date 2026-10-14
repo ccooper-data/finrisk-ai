@@ -9,10 +9,10 @@ The first window (2026-10-02) proved infrastructure provisioning and teardown. T
 - The managed node group reaches `ACTIVE`.
 - The EKS API remains private-only for this validation window.
 - The inference image is built from the pinned model and passes its local smoke test before it is pushed.
-- The deploy build rolls out the digest-pinned image, the pod is ready, and the in-pod smoke test returns a valid prediction from the pinned model.
+- The deploy build rolls out the digest-pinned image, the pod is ready, and the in-pod smoke test returns a valid prediction from the pinned model. From PR 2b, Argo CD rolls it out (below), and the build also records PromQL evidence from the in-cluster Prometheus.
 - Evidence is captured, then the environment is destroyed no later than the persisted teardown lease.
 
-A failed deploy is rolled back inside the build (deleted, on a first deploy). The window does not exercise that path, because the controlled deploy cannot ship a non-ready candidate; it is validated offline by `infra/tests/test_deploy_buildspec_runtime.py` (see `docs/live-aws-validation-plan.md`).
+A failed update is rolled back inside the build: from PR 2b by re-patching the digest recorded before the change. A failed first deploy has no earlier digest; from PR 2b it is left in place for diagnosis until DESTROY (V1 deleted it). The window does not exercise these paths, because the controlled deploy cannot ship a non-ready candidate; they are validated offline by `infra/tests/test_deploy_buildspec_runtime.py` (see `docs/live-aws-validation-plan.md`).
 
 ## Deploy path
 
@@ -22,8 +22,8 @@ GitHub-hosted runners cannot reach the private EKS endpoint, so two CodeBuild pr
 |---|---|---|
 | `github-finrisk-deployer` (environment `portfolio-validation`) | Terraform lifecycle, including the CodeBuild projects and their roles | Start builds; associate any EKS access policy other than the two below; assume any `finrisk-ai-*` role; create a cluster that grants its creator admin |
 | `github-finrisk-releaser` (environment `portfolio-release`) | Push images to `finrisk-ai-inference`; start, watch and stop the two builds; read their logs | Change either project; override anything with an IAM condition key except `FINRISK_IMAGE_URI` on the deploy build (timeout and debug-session overrides have no key; debug sessions cannot connect) |
-| `finrisk-ai-codebuild-bootstrap-*` | `AmazonEKSClusterAdminPolicy` (cluster scope); creates the namespaces, the exposure guard, headless Argo CD and the lean Prometheus stack (from PR 2a) | Accept any caller-supplied variable |
-| `finrisk-ai-codebuild-deploy-*` | `AmazonEKSEditPolicy` scoped to `finrisk`: apply, roll out, exec smoke test, roll back | Create namespaces or touch other namespaces |
+| `finrisk-ai-codebuild-bootstrap-*` | `AmazonEKSClusterAdminPolicy` (cluster scope); creates the namespaces, the exposure guard, headless Argo CD and the lean Prometheus stack (from PR 2a), and the inference Application with its digest writer's Role and RoleBinding (from PR 2b) | Accept any caller-supplied variable |
+| `finrisk-ai-codebuild-deploy-*` | `AmazonEKSEditPolicy` scoped to `finrisk` (read the workload, exec the smoke and PromQL scripts), plus the Kubernetes group `finrisk-digest-writer` (from PR 2b): get, watch and patch the Application `finrisk/finrisk-inference` | Create namespaces or touch other namespaces; create or delete Applications, patch any other one, or touch AppProjects or RBAC |
 
 From PR 2a, the cluster also runs Argo CD and a lean Prometheus stack. Their rights are stated here, not claimed as least privilege:
 - The Argo CD application controller's ClusterRole is equivalent to cluster admin. Each AppProject (`infra/k8s/argocd-projects.yaml`) bounds what its Applications may deploy, but that is an Argo CD-level guard, not Kubernetes RBAC.
@@ -34,6 +34,18 @@ The served model is pinned in `model/served-model.json` (source run, size, SHA-2
 
 Training and cohort artifacts are kept for 30 days. The pinned model artifact (run 37055204267) expires 2026-11-01, and the cohort artifact that retraining needs (run 36626740566) expires 2026-10-29. After that, rebuild the cohort, retrain, show prediction equivalence with the pinned model, and update the pin in a reviewed commit; never loosen the provenance checks.
 
+### GitOps deploy (PR 2b)
+
+The bootstrap creates the Argo CD Application `finrisk/finrisk-inference` (`infra/k8s/inference-app.yaml`). It renders `charts/finrisk-inference` from this repository at the commit the PLAN was made from: PLAN passes `-var gitops_revision=$GITHUB_SHA`, the bootstrap buildspec carries it as the plain-text line `FINRISK_GITOPS_REVISION=<sha>`, and the PLAN fails unless the plan text shows that line, once, in the bootstrap project with its own commit. APPLY uses the reviewed binary plan; DESTROY and the reaper leave the variable null, and both builds refuse to run without a commit. The chart is the only deploy artifact; `infra/k8s/inference.yaml` is gone.
+
+The Application lives in `finrisk` (Argo CD's applications in any namespace, limited to `finrisk`), so only the AppProject `finrisk` applies: this repository, destination `finrisk`, nothing cluster-scoped, and only Deployment, Service, HorizontalPodAutoscaler and ServiceMonitor. Until the deploy sets an image digest the chart does not render (its values schema requires one), so Argo CD deploys nothing. The deploy build's only write is the `image.digest` Helm parameter; Argo CD syncs automatically with self-heal and no resources finalizer. The deploy is described step by step in `docs/deployment-recovery-runbook.md`.
+
+What enforces what, stated rather than claimed as Kubernetes least privilege:
+- Digest only, at the frozen commit: the deploy runner's group may patch the one Application, but Kubernetes RBAC cannot limit which fields a patch changes. The Application CRD has no status subresource, so the patch right also covers its status and the top-level `operation`. What keeps the write to the digest is the fixed, plan-reviewed deploy buildspec, which IAM lets the release role start with exactly one override, the digest-pinned `FINRISK_IMAGE_URI`. The buildspec also refuses an Application that differs from the bootstrap's in anything but the digest, or has an operation pending. It accepts convergence only from Argo CD's automated sync of the Application's own source: Argo CD v3.5.3's automated sync copies `spec.source` into its operation, so an operation with another source, with `sources` or with `manifests` never counts.
+- Image commit and chart commit: the deploy takes the image Build Inference Image pushed for the run's commit, while Argo CD renders the chart at the PLAN's commit. The frozen-`main` rule makes them one commit, and the deploy workflow refuses to start the deploy build unless the bootstrap's `gitops ... target_revision=` evidence line equals the run's commit.
+- Evidence independence: the smoke test and the PromQL queries both run inside the image under test (`kubectl exec ... python -`), so the content of their evidence lines is self-reported by that image. A pass still needs the build to succeed. A separate verifier Pod (for example `promtool` from the digest-pinned Prometheus image) would be more independent; it is not built.
+- Argo CD merges `.argocd-source*.yaml` files from a source path over the Application's parameters; CI fails if one exists anywhere in the repository (`infra/tests/test_cluster_addons.py`).
+
 ### One-time setup (administrator, before the next PLAN)
 
 1. Update `finrisk-ai-eks-boundary` to match `docs/aws-eks-boundary-policy.json`.
@@ -41,10 +53,19 @@ Training and cohort artifacts are kept for 30 days. The pinned model artifact (r
 3. Create the role `github-finrisk-releaser` with trust policy `docs/aws-release-trust-policy.json`, inline policy `docs/aws-release-policy.json`, and maximum session duration 2 hours.
 4. In GitHub, create the environment `portfolio-release` limited to `main`, with the variable `AWS_RELEASE_ROLE_ARN`.
 5. Optional, recommended: confirm with the IAM policy simulator that `StartBuild` requests carrying `BASH_ENV`, a buildspec override or an image override are denied, and that a request with only a digest-pinned `FINRISK_IMAGE_URI` is allowed.
+6. PR 2b, after it is reviewed and merged: let the runner access entries carry the Kubernetes group `finrisk-digest-writer`. It must be the default version before the APPLY of any plan made from a commit that includes PR 2b; without it, `eks:CreateAccessEntry` for the deploy runner is denied partway through APPLY, and the window must DESTROY. It only relaxes the policy (a request without groups still matches), so V1 and PR 2a plans keep applying, and it can be done any time before that APPLY.
+   1. Open IAM > Policies > `finrisk-ai-deployer-deploy-path` (attached to `github-finrisk-deployer`) and choose **Edit**, then **JSON**.
+   2. In the statement with Sid `CreateCodeBuildAccessEntries`, replace the whole `Condition` object with exactly:
+      `{"ArnLike":{"eks:principalArn":"arn:aws:iam::780976819607:role/finrisk-ai-codebuild-*"},"StringEquals":{"eks:accessEntryType":"STANDARD"},"ForAllValues:StringEquals":{"eks:kubernetesGroups":"finrisk-digest-writer"},"Null":{"eks:username":"true"}}`
+      Leave every other statement unchanged. Alternatively, paste the whole `docs/aws-deployer-deploy-path-policy.json` from the merged commit.
+   3. Save it as the new default version. If the policy already has five versions, delete the oldest non-default version first.
+   4. Check the end state: open the policy's default version. Its JSON shows the `ForAllValues:StringEquals` line with `eks:kubernetesGroups` and `finrisk-digest-writer`, and its `Null` block contains only `eks:username`. The file is 5,960 of the 6,144 characters a managed policy allows (minified).
+
+   No other IAM change: the deployer's inline policy (`docs/aws-bootstrap-policy.json`), the release policy (`docs/aws-release-policy.json`), `finrisk-ai-eks-boundary` and both trust policies stay as they are.
 
 ### Window sequence
 
-PLAN, review, APPLY the reviewed plan, then **Build Inference Image** (the ECR repository exists only while the stack is up), then **Deploy FinRisk Inference**, then capture evidence and DESTROY. `main` stays frozen from PLAN to DESTROY: the deploy takes no image input and uses the image built from its own commit, and the deploy buildspec's expected model SHA-256 is fixed at PLAN time, so all three must be the same commit. The deploy shares the provision workflow's concurrency group, so a manual DESTROY never starts under a running in-VPC build. The hourly reaper runs in its own group, so start the deploy promptly after APPLY; it then finishes well before the lease expires. Save the window's workflow artifacts (plan, provisioning, image and deployment evidence) and the CodeBuild logs before DESTROY: DESTROY deletes the CodeBuild log group and the image, and those artifacts expire after 7 days.
+PLAN, review, APPLY the reviewed plan, then **Build Inference Image** (the ECR repository exists only while the stack is up), then **Deploy FinRisk Inference**, then capture evidence and DESTROY. `main` stays frozen from PLAN to DESTROY: the deploy takes no image input and uses the image built from its own commit, and the deploy buildspec's expected model SHA-256 and the commit Argo CD deploys the chart from are fixed at PLAN time, so all three must be the same commit (the deploy workflow checks the last). The deploy shares the provision workflow's concurrency group, so a manual DESTROY never starts under a running in-VPC build. The hourly reaper runs in its own group, so start the deploy promptly after APPLY; it then finishes well before the lease expires. Save the window's workflow artifacts (plan, provisioning, image and deployment evidence) and the CodeBuild logs before DESTROY: DESTROY deletes the CodeBuild log group and the image, and those artifacts expire after 7 days.
 
 ## Cost enforcement
 

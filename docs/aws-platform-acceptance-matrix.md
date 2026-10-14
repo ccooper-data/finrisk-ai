@@ -31,6 +31,10 @@ Status vocabulary:
 | Live CloudWatch telemetry | not implemented end to end: instrumentation and alarm definitions exist, but there is no OpenTelemetry exporter or log shipping (V1.1), so the alarms had no data source in the window | IMPLEMENTED / LIVE VALIDATION PENDING |
 | Live failed-deploy rollback | not exercisable in a bounded window: the controlled deploy cannot ship a non-ready candidate; needs a reviewed failure-injection mechanism | IMPLEMENTED / LIVE VALIDATION PENDING |
 | Live teardown/cost evidence | 2026-10-02 and 2026-10-03 windows (`docs/AWS_VALIDATION_CLOSEOUT.md`): DESTROY with empty state verified; cost snapshot recorded | LIVE VALIDATED |
+| V2 cluster add-ons (Argo CD, lean Prometheus, exposure guard) | PR 2a: bootstrap build with pinned charts and image digests, the guard proven by server-side dry runs; CI renders with negative controls; not yet run in a window | IMPLEMENTED / LIVE VALIDATION PENDING |
+| V2 GitOps digest-only deploy | PR 2b: Argo CD Application at the PLAN's commit; the deploy build patches only `image.digest` and waits for Argo CD to converge on it; deploy buildspec run against a fake kubectl; not yet run in a window | IMPLEMENTED / LIVE VALIDATION PENDING |
+| V2 Prometheus evidence of the deployed model | PR 2b: in-pod PromQL against the in-cluster Prometheus after the smoke test; fake Prometheus in CI; not yet run in a window | IMPLEMENTED / LIVE VALIDATION PENDING |
+| V2 failed-deploy handling | PR 2b: a failed update re-patches the previous digest; a failed first deploy is retained for diagnosis until DESTROY; fake kubectl in CI only | IMPLEMENTED / LIVE VALIDATION PENDING |
 
 ## Final acceptance rule
 The repository may be described as a **production-shaped AWS platform implementation** after static/CI acceptance. It must not be described as a fully production-validated AWS deployment until the bounded live-validation items above are executed and their evidence is retained.

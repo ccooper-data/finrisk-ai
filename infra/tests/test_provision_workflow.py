@@ -17,6 +17,11 @@ steps = {s["name"]: s for s in yaml.safe_load(workflow)["jobs"]["execute"]["step
 names = list(steps)
 orphans = steps.get("Verify no orphaned AWS resources", {})
 upload = steps.get("Upload teardown evidence", {})
+plan_step = steps.get("Create bounded validation plan", {})
+pin_step = steps.get("Verify the plan pins the GitOps revision", {})
+destroy_step = steps.get("Destroy bounded validation environment", {})
+reaper = (ROOT / ".github" / "workflows" / "reap-bounded-aws.yml").read_text()
+SHA = "0123456789abcdef0123456789abcdef01234567"
 cluster = "-".join(re.search(rf'variable "{v}" \{{[^}}]*default\s*=\s*"([^"]+)"', variables)[1] for v in ("project_name", "environment"))
 
 
@@ -44,6 +49,69 @@ def orphan_check(**fake):
         shutil.rmtree(work, ignore_errors=True)
 
 
+def heredoc(lines):
+    return "<<-EOT\n" + "".join(f"                {l}\n" if l else "\n" for l in lines) + "            EOT"
+
+
+def plan_text(bootstrap, deploy, entry=()):
+    """`terraform show` output for the two CodeBuild projects as created from empty state; a buildspec is a
+    list of lines (shown as a heredoc) or None for "(known after apply)". `entry` adds lines to the access
+    entry's block (a third resource)."""
+    def project(name, spec):
+        value = "(known after apply)" if spec is None else heredoc(spec)
+        return (f"  # aws_codebuild_project.{name}[0] will be created\n"
+                f'  + resource "aws_codebuild_project" "{name}" {{\n'
+                f"      + arn                    = (known after apply)\n"
+                f"      + build_timeout          = 25\n"
+                f"      + source {{\n          + buildspec           = {value}\n"
+                f'          + type                = "NO_SOURCE"\n        }}\n    }}\n\n')
+    return ("Terraform will perform the following actions:\n\n" + project("k8s_bootstrap", bootstrap) + project("k8s_deploy", deploy)
+            + "  # aws_eks_access_entry.k8s_deploy[0] will be created\n  + resource \"aws_eks_access_entry\" \"k8s_deploy\" {\n"
+            + "      + kubernetes_groups = [\n          + \"finrisk-digest-writer\",\n        ]\n" + "".join(f"      {l}\n" for l in entry)
+            + "    }\n\nPlan: 60 to add, 0 to change, 0 to destroy.\n")
+
+
+def pin_check(plan, step=None):
+    """Runs the PLAN's pin step (or `step`) on a plan text; returns its exit code and output."""
+    work = Path(tempfile.mkdtemp(prefix="finrisk-plan-pin-"))
+    try:
+        (work / "tf").mkdir()
+        (work / "tf/bounded-validation-plan.txt").write_text(plan)
+        env = dict(os.environ, TF_DIR="tf", GITHUB_SHA=SHA)
+        result = subprocess.run(["bash", "-e", "-c", step or pin_step.get("run", "exit 99")], cwd=work, env=env, capture_output=True,
+                                text=True, timeout=60)
+        return result.returncode, result.stdout + result.stderr
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+BOOTSTRAP = ["version: 0.2", "phases:", "  build:", "    commands:", "      - |", "        set -euo pipefail",
+             "        # The PLAN's commit (-var gitops_revision), checked in the plan text; refused unless a commit.",
+             f"        FINRISK_GITOPS_REVISION={SHA}", "        mkdir -p /opt/finrisk/bin /tmp/finrisk"]
+DEPLOY = ["version: 0.2", "phases:", "  build:", "    commands:", "      - |", "        set -euo pipefail", f"        TARGET_REVISION={SHA}"]
+PIN_CASES = {  # name: (plan text, passes)
+    "the bootstrap buildspec in full, pinned to this commit": (plan_text(BOOTSTRAP, DEPLOY), True),
+    "the bootstrap buildspec unknown at PLAN, the marker only in the deploy's": (plan_text(None, DEPLOY + [
+        f"        FINRISK_GITOPS_REVISION={SHA}"]), False),
+    "the bootstrap buildspec unknown at PLAN": (plan_text(None, DEPLOY), False),
+    "the deploy buildspec unknown at PLAN": (plan_text(BOOTSTRAP, None), False),
+    "another commit": (plan_text([l.replace(SHA, "f" * 40) for l in BOOTSTRAP], DEPLOY), False),
+    "a PLAN without -var (unset)": (plan_text([l.replace(SHA, "unset") for l in BOOTSTRAP], DEPLOY), False),
+    "the marker twice": (plan_text(BOOTSTRAP + [f"        FINRISK_GITOPS_REVISION={SHA}"], DEPLOY), False),
+    "the commit inside a longer line": (plan_text([l.replace(f"FINRISK_GITOPS_REVISION={SHA}", f"FINRISK_GITOPS_REVISION={SHA}0")
+                                                   for l in BOOTSTRAP], DEPLOY), False),
+    # The critique fix: a known bootstrap buildspec without the marker fails, wherever else the marker is.
+    "the bootstrap buildspec known without the marker, the marker only in the deploy's": (plan_text(
+        [l for l in BOOTSTRAP if "FINRISK_GITOPS_REVISION" not in l], DEPLOY + [f"        FINRISK_GITOPS_REVISION={SHA}"]), False),
+    "the bootstrap buildspec known without the marker, the marker in another resource": (plan_text(
+        [l for l in BOOTSTRAP if "FINRISK_GITOPS_REVISION" not in l], DEPLOY, entry=[f"        FINRISK_GITOPS_REVISION={SHA}"]), False),
+}
+pins = {name: pin_check(text) for name, (text, _) in PIN_CASES.items()}
+# Negative control: a step that greps the whole plan, not the bootstrap's block, accepts both.
+UNSCOPED = pin_step.get("run", "").replace('<<<"$bootstrap"', '"$plan"')
+unscoped = {name: pin_check(PIN_CASES[name][0], UNSCOPED)[0] if UNSCOPED != pin_step.get("run", "") else 99 for name in (
+    "the bootstrap buildspec known without the marker, the marker only in the deploy's",
+    "the bootstrap buildspec known without the marker, the marker in another resource")}
 clean = orphan_check()
 leftover = {"VPC": orphan_check(vpcs="vpc-0123"), "VPC with network interfaces": orphan_check(vpcs="vpc-0123\tvpc-0456", enis="eni-0a eni-0b"),
             "cluster-owned volume": orphan_check(owned="vol-0aaa"), "node volume": orphan_check(nodes="vol-0bbb\tvol-0aaa")}
@@ -63,6 +131,16 @@ checks = {
     "budget email comes from secret": "secrets.BUDGET_ALERT_EMAIL" in workflow,
     "budget email Terraform variable sensitive": "sensitive   = true" in variables,
     "plan creates binary plan": "plan -out=bounded-validation.tfplan" in workflow,
+    # Argo CD deploys the chart from the PLAN's commit; DESTROY and the reaper rely on the null default.
+    "PLAN pins the GitOps revision to its own commit; DESTROY and the reaper pass none":
+        '-var="gitops_revision=$GITHUB_SHA"' in plan_step.get("run", "") and workflow.count("gitops_revision=") == 1
+        and "gitops_revision" not in destroy_step.get("run", "") and "gitops_revision" not in reaper,
+    "the plan-text pin check runs on PLAN, right after the plan, before it is stored":
+        pin_step.get("if") == "inputs.action == 'plan'" and names.index("Create bounded validation plan") + 1
+        == names.index("Verify the plan pins the GitOps revision") < names.index("Store private binary plan in state bucket"),
+    **{f"plan-text pin check: {name} {'passes' if ok else 'fails'}": (pins[name][0] == 0) == ok
+       for name, (_, ok) in PIN_CASES.items()},
+    **{f"negative control: an unscoped pin check passes {name}": code == 0 for name, code in unscoped.items()},
     "no JSON plan published": "show -json" not in workflow,
     "binary plan stored privately": 'aws s3 cp "$TF_DIR/bounded-validation.tfplan"' in workflow
         and "/plans/${GITHUB_RUN_ID}/bounded-validation.tfplan" in workflow,

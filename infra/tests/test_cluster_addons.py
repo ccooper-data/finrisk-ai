@@ -29,23 +29,26 @@ BUILD_TIMEOUT = int(re.search(r'resource "aws_codebuild_project" "k8s_bootstrap"
 DIGEST = re.compile(r"[^@\s]+@sha256:[0-9a-f]{64}")
 HEX = re.compile(r"[0-9a-f]{64}")
 EMBEDDED = {"cluster_guards": "cluster-guards.yaml", "argocd_values": "argocd-values.yaml",
-            "argocd_projects": "argocd-projects.yaml", "monitoring_app": "monitoring-app.yaml"}
+            "argocd_projects": "argocd-projects.yaml", "monitoring_app": "monitoring-app.yaml",
+            "inference_app": "inference-app.yaml"}
 MONITORING_CHART = "oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack"
 IN_CLUSTER = "https://kubernetes.default.svc"
 
 
-# --- AppProjects ---------------------------------------------------------------------------------
+# --- AppProjects (finrisk, the inference chart's, is checked in test_gitops_objects.py) -----------
 def project_properties(projects):
     by = {p["metadata"]["name"]: p.get("spec", {}) for p in projects}
     monitoring = by.get("finrisk-monitoring", {})
     return {
-        "AppProjects: default and finrisk-monitoring, in argocd": sorted(by) == ["default", "finrisk-monitoring"]
+        "AppProjects: default, finrisk-monitoring and finrisk, in argocd": sorted(by) == ["default", "finrisk", "finrisk-monitoring"]
             and all(p["metadata"].get("namespace") == "argocd" for p in projects),
         "default is locked: no source, destination or kind": {k: by.get("default", {}).get(k) for k in (
             "sourceRepos", "destinations", "clusterResourceWhitelist", "namespaceResourceWhitelist")}
             == dict.fromkeys(("sourceRepos", "destinations", "clusterResourceWhitelist", "namespaceResourceWhitelist"), []),
-        # Only Applications in argocd, which only the bootstrap writes, may use a project without them.
-        "no project lists sourceNamespaces": not any("sourceNamespaces" in p for p in by.values()),
+        # Only Applications in argocd, which only the bootstrap writes, may use a project without them; an
+        # Application in finrisk (which the deploy group may patch) may use finrisk alone.
+        "only finrisk lists sourceNamespaces, and only finrisk": {n: p["sourceNamespaces"] for n, p in by.items()
+                                                                 if "sourceNamespaces" in p} == {"finrisk": ["finrisk"]},
         "finrisk-monitoring: the chart's OCI repository only, into monitoring only":
             monitoring.get("sourceRepos") == [MONITORING_CHART]
             and monitoring.get("destinations") == [{"server": IN_CLUSTER, "namespace": "monitoring"}],
@@ -67,9 +70,13 @@ def project(projects, name):
 
 PROJECT_CONTROLS = {
     "argocd in sourceNamespaces": (lambda ps: project(ps, "finrisk-monitoring").update(sourceNamespaces=["argocd"]),
-                                   "no project lists sourceNamespaces"),
+                                   "only finrisk lists sourceNamespaces, and only finrisk"),
     "a wildcard sourceNamespaces on default": (lambda ps: project(ps, "default").update(sourceNamespaces=["*"]),
-                                               "no project lists sourceNamespaces"),
+                                               "only finrisk lists sourceNamespaces, and only finrisk"),
+    "finrisk-monitoring open to finrisk": (lambda ps: project(ps, "finrisk-monitoring").update(sourceNamespaces=["finrisk"]),
+                                           "only finrisk lists sourceNamespaces, and only finrisk"),
+    "finrisk open to every namespace": (lambda ps: project(ps, "finrisk")["sourceNamespaces"].append("*"),
+                                        "only finrisk lists sourceNamespaces, and only finrisk"),
     "any repository": (lambda ps: project(ps, "finrisk-monitoring")["sourceRepos"].append("*"),
                        "finrisk-monitoring: the chart's OCI repository only, into monitoring only"),
     "any namespace": (lambda ps: project(ps, "finrisk-monitoring")["destinations"][0].update(namespace="*"),
@@ -394,8 +401,8 @@ checks = {
                 and f"${{{n}_sha256}}  /tmp/finrisk/{f}\n" in BOOTSTRAP for n, f in EMBEDDED.items())
         and """awk '/^#==> /{f="/tmp/finrisk/"$2; next} {print > f}'""" in BOOTSTRAP
         and "sha256sum --check --strict <<EOF" in BOOTSTRAP,
-    "bootstrap evidence: node, guard, argocd, monitoring, then bootstrap=complete":
-        evidence(BOOTSTRAP) == ["node", "guard", "argocd", "monitoring", "bootstrap=complete"],
+    "bootstrap evidence: node, guard, argocd, monitoring, gitops, then bootstrap=complete":
+        evidence(BOOTSTRAP) == ["node", "guard", "argocd", "monitoring", "gitops", "bootstrap=complete"],
     "only the last bootstrap evidence line is terminal": terminal_last(BOOTSTRAP),
     "negative control: an earlier bootstrap= line is caught": not terminal_last(early),
     f"bootstrap waits and downloads at their bounds ({f'{BUDGET / 60:.1f} min' if BUDGET else 'one has no recognised bound'}) "
