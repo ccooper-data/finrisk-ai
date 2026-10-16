@@ -214,8 +214,9 @@ def known_attributes_are_known():
 
 def rendered_size(template, values, embedded):
     """The rendered length: every ${name} replaced by a value of its real length (values, else a 64-hex
-    sha256), each embedded payload by base64 of its gzip. Python's level 6 came out 24 characters longer
-    than Terraform's base64gzip for the bootstrap bundle (terraform 1.9.8), so this errs slightly high."""
+    sha256), each embedded payload by base64 of its gzip. Python's level 6 is within a few characters of
+    Terraform's base64gzip, but not always above it (terraform 1.9.8: 20 longer for the bootstrap, 8 shorter
+    for the deploy), so the check keeps CAP_MARGIN under the cap."""
     rendered = template.replace("$${", "\0")
     for name, data in embedded.items():
         rendered = rendered.replace("${" + name + "}", base64.b64encode(gzip.compress(data, 6)).decode())
@@ -376,17 +377,55 @@ manifests = ROOT / "infra/k8s"
 # The bootstrap's bundle as deploy_path.tf builds it: a "#==> <file>" line before each file.
 bundle = "".join(f"#==> {f}\n" + (manifests / f).read_text()
                  for f in re.findall(r'"([^"]+)"', re.search(r"k8s_bootstrap_files\s+= \[(.*)\]", path_tf)[1])).encode()
+# The deploy's: the in-pod smoke and PromQL scripts and the load test's Job.
+DEPLOY_FILES = re.findall(r'"([^"]+)"', re.search(r"k8s_deploy_files\s+= \[(.*)\]", path_tf)[1])
+deploy_bundle = "".join(f"#==> {f}\n" + (manifests / f).read_text() for f in DEPLOY_FILES).encode()
+DEPLOY_SHA = {f: f.split(".")[0].replace("-", "_") + "_sha256" for f in DEPLOY_FILES}
+SHA_CHECK = "        sha256sum --check --strict <<EOF\n"
+
+
+def bundle_checked(spec):
+    """The deploy unpacks the embedded files, then checks exactly those files against the plan's sha256
+    values as a plain command (nothing after it: set -e stops the build on a mismatch), before it reaches
+    the cluster. The runtime test shows a mismatch stops it (test_deploy_buildspec_runtime.py)."""
+    unpack = """        printf '%s' "${k8s_bundle_b64}" | base64 -d | gunzip | awk '/^#==> /{f="/tmp/"$2; next} {print > f}'\n"""
+    heredoc = SHA_CHECK + "".join(f"        ${{{v}}}  /tmp/{f}\n" for f, v in DEPLOY_SHA.items()) + "        EOF\n"
+    return spec.count("sha256sum --check --strict <<EOF") == 1 and unpack + heredoc in spec \
+        and spec.index(heredoc) < spec.index("aws eks update-kubeconfig")
+
+
+KUBECONFIG_LINE = '        aws eks update-kubeconfig --name "${cluster_name}" --region "${region}"\n'
+BUNDLE_CONTROLS = {
+    "the check's failure ignored (|| :)": lambda s: s.replace(SHA_CHECK, SHA_CHECK.replace("<<EOF", "<<EOF || :"), 1),
+    "the check's failure ignored (|| true)": lambda s: s.replace(SHA_CHECK, SHA_CHECK.replace("<<EOF", "<<EOF || true"), 1),
+    "a file left out of the check": lambda s: s.replace("        ${promql_sha256}  /tmp/promql.py\n", "", 1),
+    "the check after the cluster is reached": lambda s: s.replace(KUBECONFIG_LINE, "", 1).replace(
+        SHA_CHECK, KUBECONFIG_LINE + SHA_CHECK, 1) if KUBECONFIG_LINE in s else s,
+}
 REAL = {"cluster_name": "finrisk-ai-portfolio", "region": REGION, "account_id": ACCOUNT, "repository": REPO, "namespace": "finrisk",
         "argocd_namespace": "argocd", "monitoring_namespace": "monitoring", "app": "finrisk-inference", "node_instance_type": "m7i-flex.large",
         "kubectl_version": "v1.35.9", "helm_version": "v4.3.0", "argocd_chart_version": "10.9.6", "gitops_revision": "a" * 40,
         "image_repository": f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/{REPO}", "repo_url": "https://github.com/ccooper-data/finrisk-ai.git",
-        "chart_path": "charts/finrisk-inference", "prometheus_url": "http://monitoring-prometheus.monitoring.svc.cluster.local:9090"}
+        "chart_path": "charts/finrisk-inference"}
 sizes = {
     "bootstrap": rendered_size(bootstrap_spec, REAL, {"k8s_bundle_b64": bundle}),
-    "deploy": rendered_size(deploy_spec, REAL, {}),
+    "deploy": rendered_size(deploy_spec, REAL, {"k8s_bundle_b64": deploy_bundle}),
 }
+# The inline buildspec limit is not on the CodeBuild quotas page; a secondary source says 25,600. CI caps
+# the rendered buildspec at 20,000, and the estimate must stay CAP_MARGIN under it: it can come out a few
+# characters below Terraform's render.
+CAP, CAP_MARGIN = 20000, 50
+
+
+def fits_cap(size):
+    return size <= CAP - CAP_MARGIN
+
+
+# A deploy buildspec whose estimate is inside the margin, though under the cap, must not pass.
+inside_margin = rendered_size(deploy_spec + "#" * max(1, CAP - CAP_MARGIN + 1 - sizes["deploy"]), REAL, {"k8s_bundle_b64": deploy_bundle})
+# The deploy's evidence lines include those its in-pod scripts print.
 evidence_lines = {name: re.findall(r'(?:echo "|print\(")FINRISK_EVIDENCE ([^"]*)"', spec) for name, spec in
-                  (("bootstrap", bootstrap_spec), ("deploy", deploy_spec))}
+                  (("bootstrap", bootstrap_spec), ("deploy", deploy_spec + "".join((manifests / f).read_text() for f in DEPLOY_FILES)))}
 
 checks = {
     # Cluster authorization and network
@@ -444,9 +483,19 @@ checks = {
         re.search(r"^\s+gitops_revision\s+= local\.gitops_revision$", bootstrap_cfg, re.M) is not None
         and re.search(r"^\s+image_repository\s+= local\.inference_repository$", bootstrap_cfg, re.M) is not None
         and all(re.search(rf"^\s+{k}\s+= local\.{v}$", deploy_cfg, re.M) for k, v in (
-            ("gitops_revision", "gitops_revision"), ("repo_url", "gitops_repo_url"), ("chart_path", "gitops_chart_path"),
-            ("prometheus_url", "prometheus_url")))
+            ("gitops_revision", "gitops_revision"), ("repo_url", "gitops_repo_url"), ("chart_path", "gitops_chart_path")))
         and "manifest_b64" not in path_tf + deploy_spec and not (ROOT / "infra/k8s/inference.yaml").exists(),
+    # As the bootstrap's: the reviewed plan shows each embedded file's sha256 in plain text, and the build
+    # refuses a file that differs, before it changes anything.
+    "deploy embeds the in-pod scripts and the load Job from infra/k8s, each checked against its sha256 before any change":
+        DEPLOY_FILES == ["smoke.py", "promql.py", "load-job.yaml"]
+        and 'k8s_bundle_b64   = base64gzip(join("", [for f in local.k8s_deploy_files : "#==> ${f}\\n${file("${local.k8s_manifests}/${f}")}"]))'
+        in deploy_cfg
+        and all(re.search(rf'^\s+{v}\s+= filesha256\("\$\{{local\.k8s_manifests\}}/{re.escape(f)}"\)$', deploy_cfg, re.M)
+                for f, v in DEPLOY_SHA.items())
+        and bundle_checked(deploy_spec) and all((manifests / f).read_text().endswith("\n") for f in DEPLOY_FILES),
+    **{f"negative control: {name} is caught": mutate(deploy_spec) != deploy_spec and not bundle_checked(mutate(deploy_spec))
+       for name, mutate in BUNDLE_CONTROLS.items()},
     # Kubernetes group: the deploy runner's entry only, the same literal in Terraform, IAM and the RoleBinding.
     "the deploy runner's access entry carries exactly the digest-writer group; the bootstrap's none":
         "kubernetes_groups = [local.k8s_digest_writer_group]" in deploy_entry and "kubernetes_groups" not in bootstrap_entry
@@ -487,14 +536,18 @@ checks = {
     # test_cluster_addons.py, and in the deploy only the result lines may match.
     "deploy evidence: only the result lines match the terminal regex": bool(evidence_lines["deploy"]) and all(
         bool(re.search(r"result=|bootstrap=", line)) == line.startswith("result=") for line in evidence_lines["deploy"]),
-    # The inline buildspec limit is not on the CodeBuild quotas page; a secondary source says 25,600.
-    **{f"{name} buildspec renders to at most 20,000 characters (about {size:,})": size <= 20000 for name, size in sizes.items()},
-    "build timeouts: bootstrap 25, deploy 30, each queued at most 10": timeouts == {"bootstrap": (25, 10), "deploy": (30, 10)},
-    "workflow waits cover queue plus build: bootstrap 35, deploy 45":
+    **{f"{name} buildspec renders to at most {CAP - CAP_MARGIN:,} characters, {CAP_MARGIN} under the {CAP:,} cap (about {size:,})":
+       fits_cap(size) for name, size in sizes.items()},
+    f"negative control: a deploy buildspec estimated at {inside_margin:,}, inside the margin, is caught":
+        inside_margin <= CAP and not fits_cap(inside_margin),
+    # PR 3's load test raised the deploy's three together: build 30 to 36, wait 45 to 51, job 90 to 96.
+    "build timeouts: bootstrap 25, deploy 36 (with the load test), each queued at most 10":
+        timeouts == {"bootstrap": (25, 10), "deploy": (36, 10)},
+    "workflow waits cover queue plus build: bootstrap 35, deploy 51 (with 5 to spare)":
         wait.get("Bootstrap cluster add-ons") == 35 >= sum(timeouts["bootstrap"])
-        and wait.get("Deploy digest-pinned image") == 45 >= sum(timeouts["deploy"]),
+        and wait.get("Deploy digest-pinned image") == 51 >= sum(timeouts["deploy"]) + 5,
     "job timeout covers both waits and cleanup, inside the role session":
-        deploy_jobs["timeout-minutes"] == 90 >= wait.get("Bootstrap cluster add-ons", 99) + wait.get("Deploy digest-pinned image", 99) + 5
+        deploy_jobs["timeout-minutes"] == 96 >= wait.get("Bootstrap cluster add-ons", 99) + wait.get("Deploy digest-pinned image", 99) + 5
         and deploy_jobs["timeout-minutes"] <= session == 120,
     # Release role IAM
     "release role can only push images and run the two builds": release_allowed == {

@@ -52,6 +52,13 @@ checks = {
     "a failed first deploy is retained, not called a rollback or recovery": "result=first_deploy_retained" in runbook
         and "This is not a rollback; do not describe it as one or as a recovery." in runbook
         and "left in place for diagnosis" in demo and "delete a failed first deploy" not in demo,
+    # V2 (PRs 2a, 2b and 3) has not run in a window: every V2 row stays pending.
+    "V2 rows, the HPA load test and the gate window's chain included, remain pending": all(
+        status(row, PENDING) for row in rows if row.startswith("V2 ")) and {"V2 HPA scale-out under a bounded load",
+                                                                           "V2 gate window evidence chain"} <= set(rows),
+    "a failed load test is documented as a failed gate, never a rollback or recovery": all(
+        f"`result={r}`" in runbook for r in ("load_not_started", "hpa_not_scaled", "hpa_evidence_failed", "load_cleanup_failed"))
+        and "none of these is a rollback or a recovery" in runbook,
     "manager/director narrative exists": "manager/director narrative" in demo,
     "cost constraint appears in demo": "$100" in demo,
 }

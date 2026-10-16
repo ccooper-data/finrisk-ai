@@ -1,0 +1,49 @@
+# The HPA load test's Job, not Argo CD's: the deploy build sets LOAD_IMAGE to the image it deployed, then deletes it.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: finrisk-load
+  labels: {app.kubernetes.io/name: finrisk-load}
+spec:
+  parallelism: 1
+  completions: 1
+  backoffLimit: 0
+  activeDeadlineSeconds: 660
+  ttlSecondsAfterFinished: 60
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: finrisk-load}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 5
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: load
+          image: LOAD_IMAGE
+          # 8 workers, 80 predictions/s for 600 s (docs/bounded-aws-validation.md).
+          command: [python, -c]
+          args:
+            - |
+              import json, socket, threading, time, urllib.request as u
+              SECONDS, WORKERS, RATE = 600, 8, 80.0
+              base = "http://" + socket.gethostbyname("finrisk-inference.finrisk.svc.cluster.local")
+              with u.urlopen(base + "/v1/model", timeout=10) as r:
+                  body = json.dumps({"features": dict.fromkeys(json.load(r)["features"])}).encode()
+              end = time.monotonic() + SECONDS
+
+              def work():
+                  due = time.monotonic()
+                  while time.monotonic() < end:
+                      try:
+                          u.urlopen(u.Request(base + "/v1/risk/predict", body, {"content-type": "application/json"}), timeout=5).close()
+                      except Exception:
+                          pass
+                      due = max(due + WORKERS / RATE, time.monotonic())
+                      time.sleep(max(0.0, due - time.monotonic()))
+
+              for t in [threading.Thread(target=work) for _ in range(WORKERS)]:
+                  t.start()
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 100m, memory: 64Mi}, limits: {cpu: 200m, memory: 128Mi}}

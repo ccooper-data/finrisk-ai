@@ -7,7 +7,8 @@
 #                    creates the inference Application at the PLAN's commit (gitops_revision).
 #   - k8s-deploy:    AmazonEKSEditPolicy scoped to the app namespace, plus the Kubernetes group
 #                    finrisk-digest-writer; sets the image digest on that Application, verifies the
-#                    rollout and the Prometheus evidence, re-patches the previous digest on failure.
+#                    rollout and the Prometheus evidence, re-patches the previous digest on failure,
+#                    then load-tests the HPA with a short-lived Job it deletes again.
 # The GitHub release role may only start these builds; it cannot edit them (see
 # docs/aws-release-policy.json). Every value in both buildspecs is known at PLAN, so the reviewed
 # plan text shows them in full (infra/tests/test_eks_deploy_path.py).
@@ -42,6 +43,8 @@ locals {
   # line before each); the build checks every file against its own sha256, shown in the plan.
   k8s_manifests       = "${path.module}/../k8s"
   k8s_bootstrap_files = ["cluster-guards.yaml", "argocd-values.yaml", "argocd-projects.yaml", "monitoring-app.yaml", "inference-app.yaml"]
+  # The same for the deploy: the scripts it runs in the inference container, and the load test's Job.
+  k8s_deploy_files = ["smoke.py", "promql.py", "load-job.yaml"]
 
   # GitOps: Argo CD renders the chart at the PLAN's commit ("unset", which both builds refuse, when
   # PLAN passed none). The image repository is spelled out from known values, never repository_url,
@@ -51,7 +54,6 @@ locals {
   gitops_chart_path       = "charts/finrisk-inference"
   k8s_digest_writer_group = "finrisk-digest-writer"
   inference_repository    = "${local.account_id}.dkr.ecr.${var.aws_region}.amazonaws.com/${aws_ecr_repository.inference.name}"
-  prometheus_url          = "http://monitoring-prometheus.${local.k8s_monitoring_namespace}.svc.cluster.local:9090"
 
   served_model = jsondecode(file("${path.module}/../../model/served-model.json"))
 
@@ -279,9 +281,9 @@ resource "aws_codebuild_project" "k8s_deploy" {
   count = var.enable_eks ? 1 : 0
 
   name                   = local.k8s_deploy_project
-  description            = "Sets the digest-pinned inference image on the Argo CD Application in the ${local.k8s_app_namespace} namespace and verifies it"
+  description            = "Sets the digest-pinned inference image on the Argo CD Application in the ${local.k8s_app_namespace} namespace, verifies it and load-tests its HPA"
   service_role           = aws_iam_role.codebuild_deploy[0].arn
-  build_timeout          = 30
+  build_timeout          = 36
   queued_timeout         = 10
   concurrent_build_limit = 1
 
@@ -319,7 +321,10 @@ resource "aws_codebuild_project" "k8s_deploy" {
       gitops_revision  = local.gitops_revision
       repo_url         = local.gitops_repo_url
       chart_path       = local.gitops_chart_path
-      prometheus_url   = local.prometheus_url
+      k8s_bundle_b64   = base64gzip(join("", [for f in local.k8s_deploy_files : "#==> ${f}\n${file("${local.k8s_manifests}/${f}")}"]))
+      smoke_sha256     = filesha256("${local.k8s_manifests}/smoke.py")
+      promql_sha256    = filesha256("${local.k8s_manifests}/promql.py")
+      load_job_sha256  = filesha256("${local.k8s_manifests}/load-job.yaml")
     })
   }
 

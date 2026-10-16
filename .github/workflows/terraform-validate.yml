@@ -75,8 +75,9 @@ jobs:
               yaml.load(path.read_text(), Loader=StrictLoader)
               print(f"PASS: {path}")
           PY
-      - name: Compile infrastructure acceptance tests
-        run: python -m compileall -q infra/tests
+      # infra/k8s holds the deploy build's in-pod scripts, which run only inside the cluster otherwise.
+      - name: Compile infrastructure acceptance tests and in-pod scripts
+        run: python -m compileall -q infra/tests infra/k8s
       - name: Network architecture acceptance
         run: python infra/tests/test_network_foundation.py
       - name: EKS architecture acceptance
@@ -99,6 +100,8 @@ jobs:
         run: python infra/tests/test_cluster_addons.py
       - name: GitOps deploy objects acceptance
         run: python infra/tests/test_gitops_objects.py
+      - name: HPA load test Job acceptance (Pod Security, bounds, exposure, its script against a stand-in)
+        run: python infra/tests/test_load_job.py
       - name: Inference image acceptance
         run: python infra/tests/test_inference_image.py
       - name: Inference chart static acceptance
@@ -130,6 +133,10 @@ jobs:
         env:
           K8S_TOOLS: ${{ runner.temp }}/k8s-tools
         run: python infra/tests/check_capacity_budget.py
+      - name: HPA load test Job schema acceptance (kubeconform)
+        env:
+          K8S_TOOLS: ${{ runner.temp }}/k8s-tools
+        run: python infra/tests/check_load_job.py
       - name: Cloud security acceptance
         run: python infra/tests/test_security_foundation.py
       - name: Observability and SLO acceptance

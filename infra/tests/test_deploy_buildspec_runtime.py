@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 # Executes the rendered deploy buildspec against a stateful fake kubectl (fakes/kubectl.py: the Argo CD
-# Application, its controller, the Deployment it syncs, the runner's authorization) to check the GitOps
-# deploy, rollback, retention and abort paths end to end (substring checks cannot catch control-flow
-# bugs). The fake runs the in-pod smoke and PromQL scripts for real, against stand-ins for the inference
-# API and Prometheus. Time is a fake clock that only `sleep` advances, so every wait's bound is exercised
-# exactly and fast. Each convergence check is shown to matter alone: the fake falsifies one thing (FAKE_SKEW)
-# and the buildspec without that one check (a negative control) deploys. Argo CD reporting OutOfSync after a
-# sync that succeeded (FAKE_OUT_OF_SYNC) deploys only for the chart's HPA and ServiceMonitor, by group, kind,
+# Application, its controller, the Deployment and HPA it syncs, the load Job, the runner's authorization)
+# to check the GitOps deploy, rollback, retention, load-test and abort paths end to end (substring checks
+# cannot catch control-flow bugs). The fake runs the in-pod smoke and PromQL scripts (infra/k8s, embedded
+# in the buildspec as Terraform embeds them) for real, against stand-ins for the inference API and
+# Prometheus. Time is a fake clock that only `sleep` advances, so every wait's bound is exercised exactly
+# and fast. Each convergence check is shown to matter alone: the fake falsifies one thing (FAKE_SKEW) and the
+# buildspec without that one check (a negative control) deploys. Argo CD reporting OutOfSync after a sync
+# that succeeded (FAKE_OUT_OF_SYNC) deploys only for the chart's HPA and ServiceMonitor, by group, kind,
 # namespace and name, and every other check still stops a skew, a missing HPA or the previous image under it.
+# sha256sum checks for real, so the embedded files must match the plan-time sha256 values the buildspec carries.
+import base64
 import copy
+import gzip
+import hashlib
 import json
 import os
 import re
@@ -26,8 +31,32 @@ ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE = (ROOT / "infra/terraform/deploy/deploy-buildspec.yml.tftpl").read_text()
 FAKE_KUBECTL = ROOT / "infra/tests/fakes/kubectl.py"
 INFERENCE_APP = (ROOT / "infra/k8s/inference-app.yaml").read_text()
-BUILD_TIMEOUT = int(re.search(r'resource "aws_codebuild_project" "k8s_deploy" \{.*?build_timeout\s+= (\d+)',
-                              (ROOT / "infra/terraform/deploy_path.tf").read_text(), re.S)[1])
+TF = (ROOT / "infra/terraform/deploy_path.tf").read_text()
+BUILD_TIMEOUT = int(re.search(r'resource "aws_codebuild_project" "k8s_deploy" \{.*?build_timeout\s+= (\d+)', TF, re.S)[1])
+K8S = ROOT / "infra/k8s"
+# The embedded files as deploy_path.tf bundles them: a "#==> <file>" line before each.
+DEPLOY_FILES = re.findall(r'"([^"]+)"', re.search(r"k8s_deploy_files\s+= \[(.*)\]", TF)[1])
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def embedded(**replaced):
+    """The deploy's k8s_bundle_b64 and each file's sha256, as Terraform computes them from infra/k8s; a
+    replaced file's text (for a negative control) gets its own matching sha256, as a reviewed plan would show."""
+    texts = {f: replaced.get(f, (K8S / f).read_text()) for f in DEPLOY_FILES}
+    text = "".join(f"#==> {f}\n" + texts[f] for f in DEPLOY_FILES)
+    return {"k8s_bundle_b64": base64.b64encode(gzip.compress(text.encode())).decode(),
+            **{f"{f.split('.')[0].replace('-', '_')}_sha256": sha(texts[f].encode()) for f in DEPLOY_FILES}}
+
+
+def file_change(name, old, new):
+    """embedded() with one replacement in one file, or None when `old` is not in it."""
+    text = (K8S / name).read_text()
+    return embedded(**{name: text.replace(old, new, 1)}) if old in text else None
+
+
 REPOSITORY = "780976819607.dkr.ecr.us-east-1.amazonaws.com/finrisk-ai-inference"
 GOOD, BAD, NEXT = (f"{REPOSITORY}@sha256:" + c * 64 for c in "abc")
 DIGEST = {uri: uri.split("@")[1] for uri in (GOOD, BAD, NEXT)}
@@ -38,9 +67,10 @@ START = 1_000_000
 values = {
     "cluster_name": "finrisk-ai-portfolio", "region": "us-east-1", "account_id": "780976819607",
     "repository": "finrisk-ai-inference", "namespace": "finrisk", "argocd_namespace": "argocd", "app": "finrisk-inference",
-    "kubectl_version": "v1.35.9", "kubectl_sha256": "0" * 64, "model_sha256": MODEL_SHA256, "gitops_revision": REVISION,
+    # The curl stub downloads an empty kubectl.
+    "kubectl_version": "v1.35.9", "kubectl_sha256": sha(b""), "model_sha256": MODEL_SHA256, "gitops_revision": REVISION,
     "repo_url": "https://github.com/ccooper-data/finrisk-ai.git", "chart_path": "charts/finrisk-inference",
-    "prometheus_url": "http://monitoring-prometheus.monitoring.svc.cluster.local:9090",
+    **embedded(),
 }
 
 
@@ -95,7 +125,9 @@ def deploy(name, image, start=None, script=None, change=None, **env):
     (cwd / "tmp").mkdir(parents=True)
     state, clock = cwd / "state.json", cwd / "clock"
     begin = json.loads((work / start / "state.json").read_text()) if start else bootstrapped()
-    begin.update(calls=[], patches=[], unbounded=[])
+    # A later run: the earlier load test's Job is gone and the HPA has scaled back down.
+    begin.update(calls=[], patches=[], unbounded=[], job=None, windows=[], load_args=[])
+    begin.pop("hpa", None)
     if change:
         change(begin)
     state.write_text(json.dumps(begin))
@@ -111,6 +143,13 @@ def deploy(name, image, start=None, script=None, change=None, **env):
 
 def evidence(out):
     return re.findall(r"^FINRISK_EVIDENCE (.*)$", out, re.M)
+
+
+def exact_windows(state):
+    """Each load PromQL window against the true load interval at its query (the fake records both): not
+    shorter by a second or more, never longer."""
+    windows = state.get("windows") or []
+    return bool(windows) and all(0 <= interval - window < 1 for window, interval in windows)
 
 
 def result(out):
@@ -156,6 +195,15 @@ AUTHZ = ("authz patch_app=yes get_app=yes get_deployment=yes get_hpa=yes patch_o
 PROMQL = ["promql name=app_up value=1", "promql name=ksm_up value=1", "promql name=requests value=1",
           "promql name=latency_mean_ms value=12.5", "promql name=predictions value=1", "promql name=inference_p95_ms value=20.5",
           "promql name=replicas_available value=1", "promql name=hpa_current_replicas value=1"]
+# The load test with FAKE_HPA scales: the HPA at 1 replica, then 3 under load; kube-state-metrics over the
+# load interval; the Job deleted.
+LOAD_EVIDENCE = ["hpa phase=before current=1 desired=1 cpu_utilization=3", "hpa phase=during current=3 desired=3 cpu_utilization=80",
+                 "promql name=hpa_max_current_replicas value=3", "promql name=hpa_max_desired_replicas value=3",
+                 "promql name=available_min value=1", "promql name=available_max value=3", "promql name=request_rate value=80",
+                 "hpa phase=after current=3 desired=3 cpu_utilization=3",
+                 "load job=finrisk-load hpa_scaled=yes max_replicas=3 job_deleted=yes"]
+# Words of the deploy's own failure handling; a load-test failure must use none of them.
+ROLLBACK_WORDS = re.compile(r"rolled_back|rollback|Re-patching|first_deploy_retained|failure=")
 SMOKE = rf"^FINRISK_EVIDENCE smoke=passed model_sha256={MODEL_SHA256} feature_count=4 probability=0\.012300$"
 # FAKE_SKEW name (fakes/kubectl.py) -> the one check of the buildspec's `ok` that it fails.
 SKEWS = {s: s for s in ("sync", "revision", "operation_revision", "compared", "operation", "synced", "synced_revision", "automated",
@@ -182,10 +230,19 @@ work = Path(tempfile.mkdtemp(prefix="finrisk-deploy-test-"))
 try:
     stubs = work / "stubs"
     stubs.mkdir()
-    # Downloads, checksums, AWS and time are not under test; kubectl is the fake. Paths reach the stubs
-    # through the environment, quoted, so spaces in the checkout or TMPDIR cannot split them.
+    # Downloads, AWS and time are not under test; kubectl is the fake. sha256sum checks for real (GNU's
+    # --check --strict form, its "<file>: OK" lines), so a file that differs from its sha256 fails. Paths
+    # reach the stubs through the environment, quoted, so spaces in the checkout or TMPDIR cannot split them.
     stub("curl", 'out=""; while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift;; esac; shift; done; : > "$out"')
-    stub("sha256sum", "cat >/dev/null; exit 0")
+    stub("sha256sum", 'exec "$FAKE_PYTHON" -c \'import hashlib, sys\n'
+                      'assert sys.argv[1:] == ["--check", "--strict"], sys.argv\n'
+                      'bad = 0\n'
+                      'for line in sys.stdin.read().splitlines():\n'
+                      '    want, path = line.split("  ", 1)\n'
+                      '    ok = hashlib.sha256(open(path, "rb").read()).hexdigest() == want\n'
+                      '    print(path + (": OK" if ok else ": FAILED"))\n'
+                      '    bad += not ok\n'
+                      'sys.exit(1 if bad else 0)\' "$@"')
     stub("aws", "exit 0")
     stub("install", 'printf \'#!/usr/bin/env bash\\nexec "$FAKE_PYTHON" "$FAKE_KUBECTL" "$@"\\n\' > "${@: -1}"; chmod +x "${@: -1}"')
     stub("python3", 'exec "$FAKE_PYTHON" "$@"')
@@ -201,9 +258,24 @@ try:
         code == 0 and digest(first) == [DIGEST[GOOD]] and image(first) == GOOD \
         and result(out) == f"result=deployed image_uri={GOOD} revision=1 argocd_revision={REVISION} previous_digest=none"
     checks["the smoke script runs in the pod and reports the pinned model"] = re.search(SMOKE, out, re.M) is not None
-    checks["evidence: authz, target revision, argocd, smoke, PromQL, then the result"] = [l.split()[0] for l in lines] == [
-        "authz", "argocd_target_revision=" + REVISION, "argocd", "smoke=passed", *["promql"] * 8, lines[-1].split()[0]] \
+    checks["evidence: authz, target revision, argocd, smoke, PromQL, the load test, then the result"] = [
+        l.split()[0] for l in lines] == ["authz", "argocd_target_revision=" + REVISION, "argocd", "smoke=passed", *["promql"] * 8,
+                                         "hpa", "hpa", *["promql"] * 5, "hpa", "load", lines[-1].split()[0]] \
         and lines[0] == AUTHZ and lines[1] == f"argocd_target_revision={REVISION} previous_digest=none"
+    checks["the load test: HPA 1 before, 3 during and after, kube-state-metrics over the load interval, Job deleted"] = \
+        lines[12:21] == LOAD_EVIDENCE
+    job = first.get("job") or {}
+    checks["the load Job runs the image just deployed, by digest, and is gone at the end"] = job.get("image") == GOOD \
+        and job.get("pods") == 1 and job.get("deleted") is True and job.get("gone") is True
+    # The build passes the seconds since it created the Job; the window grows with each poll from there.
+    load_args = first.get("load_args") or []
+    checks["the load PromQL covers exactly the load interval: at every query, window = seconds since the Job was created"] = \
+        len(load_args) == 1 and load_args[0][0] == [str(load_args[0][1])] and load_args[0][1] > 0 and exact_windows(first)
+    unpacked = {f: (work / "first-ok" / "tmp" / f).read_text() for f in DEPLOY_FILES if (work / "first-ok" / "tmp" / f).exists()}
+    checks["the embedded files unpack byte-identical to infra/k8s"] = unpacked == {f: (K8S / f).read_text() for f in DEPLOY_FILES}
+    verified = [f"tmp/{f}: OK" for f in ("kubectl", *DEPLOY_FILES)]
+    checks["kubectl and each embedded file pass a real sha256 check before any API call"] = all(v in out for v in verified) \
+        and max(out.index(v) for v in verified) < out.index("FINRISK_EVIDENCE authz")
     checks["argocd evidence: Synced and Healthy at the PLAN's commit and this digest, by an automated sync"] = any(
         l.startswith(f"argocd digest={DIGEST[GOOD]} sync=Synced out_of_sync=none revision={REVISION} compared={DIGEST[GOOD]} "
                      f"operation=Succeeded synced={DIGEST[GOOD]} synced_revision={REVISION} health=Healthy automated=True "
@@ -223,6 +295,8 @@ try:
         raise SystemExit(report_checks())
 
     only_next = {"FAKE_SKEW_DIGEST": DIGEST[NEXT]}
+    SYNCED_AT_ONCE = {"FAKE_BAD_IMAGES": DIGEST[BAD], "FAKE_STALE_DEADLINE": "1", "FAKE_REFRESH_AFTER": "-1"}
+    DEADLINE_APART = {"FAKE_BAD_IMAGES": DIGEST[BAD], "FAKE_STALE_DEADLINE": "1,0,1", "FAKE_CONTROLLER": "degraded"}
     runs = {
         "update-ok": (NEXT, "first-ok", {}),
         "update-fails": (BAD, "first-ok", {"FAKE_BAD_IMAGES": DIGEST[BAD]}),
@@ -235,7 +309,19 @@ try:
         "stale-then-refresh": (NEXT, "first-ok", {"FAKE_REFRESH_AFTER": "6"}),
         "frozen": (NEXT, "first-ok", {"FAKE_CONTROLLER": "frozen"}),
         "frozen-first": (GOOD, None, {"FAKE_CONTROLLER": "frozen"}),
-        "rollback-observe-lag": (BAD, "first-ok", {"FAKE_BAD_IMAGES": DIGEST[BAD], "FAKE_OBSERVE_LAG": "1"}),
+        # Two reads of lag: a deadline verdict needs two polls in a row, so one read would not show the
+        # observedGeneration check matters.
+        "rollback-observe-lag": (BAD, "first-ok", {"FAKE_BAD_IMAGES": DIGEST[BAD], "FAKE_OBSERVE_LAG": "2"}),
+        "rollback-stale-deadline": (BAD, "first-ok", {"FAKE_BAD_IMAGES": DIGEST[BAD], "FAKE_STALE_DEADLINE": "1"}),
+        # Argo CD synced the re-patch before the first poll, which already shows the stale deadline: the
+        # failed update's deadline (two polls, so late was set) must not carry over into the re-patch's wait.
+        "rollback-synced-at-once": (BAD, "first-ok", SYNCED_AT_ONCE),
+        # The stale deadline on the re-patch's first and third reads, an ordinary wait between them: not two
+        # polls in a row.
+        "rollback-deadline-apart": (BAD, "first-ok", DEADLINE_APART),
+        **{"load-" + m: (NEXT, "first-ok", {"FAKE_HPA": m}) for m in ("never", "at-two")},
+        **{"job-" + m: (NEXT, "first-ok", {"FAKE_JOB": m}) for m in ("create-fails", "exists", "delete-fails", "stuck", "list-fails")},
+        **{"prom-load-" + m: (NEXT, "first-ok", {"FAKE_PROM_LOAD": m}) for m in ("ksm-unscaled", "outage", "no-requests")},
         **{"skew-" + s: (NEXT, "first-ok", {"FAKE_SKEW": s, "FAKE_SKEW_DIGEST": DIGEST[NEXT]}) for s in SKEWS},
         "app-read-fails": (NEXT, "first-ok", {"FAKE_APP_GET_FAIL": "1"}),
         **{"rbac-" + r: (NEXT, "first-ok", {"FAKE_RBAC": r}) for r in ("no-group", "extra-delete", "any-name", "argocd-secrets",
@@ -261,6 +347,10 @@ try:
         "drift-previous": (NEXT, "first-ok", {"FAKE_DRIFT": "previous", **only_next}),
         "oos-rollback": (BAD, "first-ok", {"FAKE_BAD_IMAGES": DIGEST[BAD], "FAKE_OUT_OF_SYNC": "ServiceMonitor",
                                            "FAKE_SKEW_DIGEST": DIGEST[GOOD]}),
+        # Both at once: the re-patch's first poll shows the failed rollout's deadline, and Argo CD then reports
+        # the re-patched digest OutOfSync on the ServiceMonitor.
+        "oos-rollback-stale-deadline": (BAD, "first-ok", {"FAKE_BAD_IMAGES": DIGEST[BAD], "FAKE_OUT_OF_SYNC": "ServiceMonitor",
+                                                          "FAKE_SKEW_DIGEST": DIGEST[GOOD], "FAKE_STALE_DEADLINE": "1"}),
         **{"oos-skew-" + s: (NEXT, "first-ok", {"FAKE_OUT_OF_SYNC": "HorizontalPodAutoscaler", "FAKE_SKEW": s, **only_next})
            for s in SKEWS if SKEWS[s] != "sync"},
     }
@@ -300,9 +390,59 @@ try:
                                                                    "initiatedBy": {"username": "someone"}}),
     }
     scripts = {"unset-revision": render(gitops_revision="unset")}
+    # A load Job whose Pod Pod Security restricted rejects: created, but no Pod runs (FailedCreate).
+    psa = file_change("load-job.yaml", "runAsNonRoot: true", "runAsNonRoot: false")
+    scripts["job-psa-rejected"] = render(**psa) if psa else "exit 99"
+    # An embedded file that differs from the sha256 the reviewed plan shows; and, as its negative control,
+    # the same with the check's failure ignored.
+    scripts["tampered"] = render(promql_sha256=sha(b"something else"))
+    check = "        sha256sum --check --strict <<EOF\n"
+    scripts["tampered-ignored"] = render(TEMPLATE.replace(check, check.replace("<<EOF", "<<EOF || :"), 1),
+                                         promql_sha256=sha(b"something else")) if check in TEMPLATE else "exit 99"
+    # Negative control: a load PromQL window an hour wider than the load interval.
+    wide = file_change("promql.py", 'window = "[%ds]" % (time.monotonic() - started)',
+                       'window = "[%ds]" % (time.monotonic() - started + 3600)')
+    scripts["wide-window"] = render(**wide) if wide else "exit 99"
+    # Negative control: a Pod template without the label the cleanup check lists by.
+    unlabelled = file_change("load-job.yaml", "    metadata:\n      labels: {app.kubernetes.io/name: finrisk-load}\n",
+                             "    metadata:\n      labels: {app.kubernetes.io/component: load}\n")
+    scripts["unlabelled-pod"] = render(**unlabelled) if unlabelled else "exit 99"
+    # Negative control: a progress deadline counted on its first sighting fails a good re-patch.
+    two_polls = ('            progress_deadline*) [ -z "$late" ] || { failure=progress_deadline; return 0; }; late=1; return 1 ;;\n'
+                 '            *) late=""; return 1 ;;\n')
+    scripts["deadline-first-sighting"] = render(TEMPLATE.replace("            sync_failed*) failure=sync_failed; return 0 ;;\n", "", 1)
+        .replace(two_polls, '            sync_failed*|progress_deadline*) failure="$${state%% *}"; return 0 ;;\n'
+                 '            *) return 1 ;;\n', 1)) if two_polls in TEMPLATE else "exit 99"
     # Negative control: a convergence check that trusts Synced and Healthy without the digests (compared,
     # synced, the operation's source, the Deployment's image).
     scripts["trusts-stale-status"] = without("compared", "synced", "override", "image")
+    # Negative controls for the load test: the Job deleted only after a passing test, and no check that
+    # the HPA starts from 1 replica.
+    scripts["cleanup-on-success-only"] = render(TEMPLATE.replace("          load_test || :\n          kq -n", "          load_test && kq -n", 1)) \
+        if "          load_test || :\n          kq -n" in TEMPLATE else "exit 99"
+    scripts["fixed-window"] = render(TEMPLATE.replace("python - $(( $(date +%s) - start )) <", "python - 900 <", 1)) \
+        if "python - $(( $(date +%s) - start )) <" in TEMPLATE else "exit 99"
+    scripts["any-start"] = render(TEMPLATE.replace('          [[ "$hpa" == 1\\ * ]] || { load=load_not_started; return 1; }\n', "", 1)) \
+        if '          [[ "$hpa" == 1\\ * ]] || { load=load_not_started; return 1; }\n' in TEMPLATE else "exit 99"
+    # Negative control: a cleanup check that reads a failed list as "gone".
+    gone = '        gone() { left="$(kq -n "$NS" get jobs,pods -l app.kubernetes.io/name=finrisk-load -o name)" && [ -z "$left" ]; }\n'
+    scripts["gone-fails-open"] = render(TEMPLATE.replace(gone, '        gone() { [ -z "$(kq -n "$NS" get jobs,pods '
+                                                               '-l app.kubernetes.io/name=finrisk-load -o name)" ]; }\n', 1)) \
+        if gone in TEMPLATE else "exit 99"
+    # Negative control: hpa_scaled and max_replicas from every HPA reading, the one before any Job included.
+    every_reading = [('          [ -z "$start" ] || [ "$${c:-0}" -le "$top" ] || top=$c\n', '          [ "$${c:-0}" -le "$top" ] || top=$c\n'),
+                     ("wait_for 300 scaled_up && scaled=yes || load=hpa_not_scaled", "wait_for 300 scaled_up || load=hpa_not_scaled"),
+                     ('          echo "FINRISK_EVIDENCE load job=', '          [ "$top" -ge 2 ] && scaled=yes || scaled=no\n'
+                                                                    '          echo "FINRISK_EVIDENCE load job=')]
+    scripts["scaled-from-any-reading"] = render(TEMPLATE.replace(every_reading[0][0], every_reading[0][1], 1).replace(
+        *every_reading[1], 1).replace(*every_reading[2], 1)) if all(old in TEMPLATE for old, _ in every_reading) else "exit 99"
+    # Negative controls for the progress-deadline rule: late not reset before the re-patch, and not reset
+    # by a poll in between.
+    reset = '            failure="" late=""\n            if set_digest "$PREV_DIGEST"'
+    scripts["late-carried-into-repatch"] = render(TEMPLATE.replace(reset, '            failure=""\n            if set_digest "$PREV_DIGEST"', 1)) \
+        if reset in TEMPLATE else "exit 99"
+    scripts["late-kept-between-polls"] = render(TEMPLATE.replace('            *) late=""; return 1 ;;\n', '            *) return 1 ;;\n', 1)) \
+        if '            *) late=""; return 1 ;;\n' in TEMPLATE else "exit 99"
     # Negative controls: without one check of `ok`, the skew that only it catches deploys.
     mutants = {s: without(SKEWS[s]) for s in SKEWS}
     # Negative control: a progress-deadline verdict that ignores observedGeneration fails a good rollback.
@@ -324,8 +464,28 @@ try:
                                                      FAKE_SKEW_DIGEST=DIGEST[NEXT])) for s in SKEWS})
     jobs["deadline-ignores-generation"] = lambda: deploy("deadline-ignores-generation", BAD, "first-ok",
                                                          script=scripts["deadline-ignores-generation"],
-                                                         FAKE_BAD_IMAGES=DIGEST[BAD], FAKE_OBSERVE_LAG="1")
+                                                         FAKE_BAD_IMAGES=DIGEST[BAD], FAKE_OBSERVE_LAG="2")
+    jobs["deadline-first-sighting"] = lambda: deploy("deadline-first-sighting", BAD, "first-ok", script=scripts[
+        "deadline-first-sighting"], FAKE_BAD_IMAGES=DIGEST[BAD], FAKE_STALE_DEADLINE="1")
+    jobs["oos-deadline-first-sighting"] = lambda: deploy("oos-deadline-first-sighting", BAD, "first-ok", script=scripts[
+        "deadline-first-sighting"], **runs["oos-rollback-stale-deadline"][2])
+    jobs["job-psa-rejected"] = lambda: deploy("job-psa-rejected", NEXT, "first-ok", script=scripts["job-psa-rejected"])
+    jobs["cleanup-on-success-only"] = lambda: deploy("cleanup-on-success-only", NEXT, "first-ok", script=scripts[
+        "cleanup-on-success-only"], FAKE_HPA="never")
+    jobs["fixed-window"] = lambda: deploy("fixed-window", NEXT, "first-ok", script=scripts["fixed-window"])
+    jobs["any-start"] = lambda: deploy("any-start", NEXT, "first-ok", script=scripts["any-start"], FAKE_HPA="at-two")
     jobs["extra-json-patch"] = lambda: deploy("extra-json-patch", NEXT, "first-ok", script=scripts["extra-json-patch"])
+    jobs["tampered"] = lambda: deploy("tampered", NEXT, "first-ok", script=scripts["tampered"])
+    jobs["tampered-ignored"] = lambda: deploy("tampered-ignored", NEXT, "first-ok", script=scripts["tampered-ignored"])
+    jobs["wide-window"] = lambda: deploy("wide-window", NEXT, "first-ok", script=scripts["wide-window"], FAKE_PROM_LOAD="ksm-unscaled")
+    jobs["unlabelled-pod"] = lambda: deploy("unlabelled-pod", NEXT, "first-ok", script=scripts["unlabelled-pod"], FAKE_JOB="stuck")
+    jobs["gone-fails-open"] = lambda: deploy("gone-fails-open", NEXT, "first-ok", script=scripts["gone-fails-open"], FAKE_JOB="list-fails")
+    jobs["scaled-from-any-reading"] = lambda: deploy("scaled-from-any-reading", NEXT, "first-ok", script=scripts["scaled-from-any-reading"],
+                                                     FAKE_HPA="at-two")
+    jobs["late-carried-into-repatch"] = lambda: deploy("late-carried-into-repatch", BAD, "first-ok",
+                                                       script=scripts["late-carried-into-repatch"], **SYNCED_AT_ONCE)
+    jobs["late-kept-between-polls"] = lambda: deploy("late-kept-between-polls", BAD, "first-ok",
+                                                     script=scripts["late-kept-between-polls"], **DEADLINE_APART)
 
     def mutated(*changes):
         """The rendered buildspec with each (old, new, count) applied; "exit 99" when old does not occur count times."""
@@ -340,7 +500,8 @@ try:
     # chart-object or the non-empty condition, an extra object or an empty list passes; tolerating all four
     # chart objects lets drift on the Deployment or Service through; keyed without the namespace or the group,
     # a same-named object elsewhere passes; an image check of the inference container alone misses a sidecar;
-    # without the hpa or image check, a missing HPA or the previous image under OutOfSync deploys.
+    # without the image check the previous image under OutOfSync deploys, and without the hpa check a missing
+    # HPA is served (only the load test, which reads the HPA after the release serves, then fails).
     sync_line = '"sync": f["sync"] == "Synced" or f["sync"] == "OutOfSync" and bool(oos) and set(oos) <= chart,'
     image_line = ('image = ",".join(c.get("image") or "none" for k in ("initContainers", "containers") '
                   'for c in dig(dep, "spec", "template", "spec", k) or []) or "none"')
@@ -374,8 +535,10 @@ try:
                  for n, c in tolerance_controls.items()})
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = dict(zip(jobs, pool.map(lambda f: f(), jobs.values())))
-    controls = {"trusts-stale-status", "deadline-ignores-generation", "extra-json-patch", *("without " + s for s in SKEWS),
-                *("control " + n for n in tolerance_controls)}
+    controls = {"trusts-stale-status", "deadline-ignores-generation", "deadline-first-sighting", "extra-json-patch",
+                "cleanup-on-success-only", "any-start", "fixed-window", "tampered-ignored", "wide-window", "unlabelled-pod",
+                "gone-fails-open", "scaled-from-any-reading", "late-carried-into-repatch", "late-kept-between-polls",
+                "oos-deadline-first-sighting", *("without " + s for s in SKEWS), *("control " + n for n in tolerance_controls)}
     every = [first, *(r[2] for name, r in results.items() if name not in controls)]
     checks["no call reaches the API server without a bound (fake kubectl refuses one)"] = not any(s.get("unbounded") for s in every)
     checks["no call the fake does not model, and no patch but the digest patch, in any scenario"] = not any(map(stray_calls, every))
@@ -383,6 +546,15 @@ try:
     checks["negative control: a second (JSON) patch whose refusal is ignored is caught"] = bool(stray_calls(state)) \
         and result(out) is not None and result(out).startswith("result=deployed")
     checks["no scenario takes longer than build_timeout on the fake clock"] = all(r[3] < BUILD_TIMEOUT * 60 for r in results.values())
+    checks["every load PromQL window in every scenario is the load interval at its query, never wider"] = all(
+        exact_windows(s) for s in every if s.get("windows"))
+
+    code, out, state, _ = results["tampered"]
+    checks["an embedded file that differs from the plan's sha256 stops the build before any API call"] = code != 0 \
+        and "tmp/promql.py: FAILED" in out and state["calls"] == ["version --client"] and result(out) is None
+    code, out, state, _ = results["tampered-ignored"]
+    checks["negative control: with the sha256 check's failure ignored, that file is used and the build deploys"] = code == 0 \
+        and "tmp/promql.py: FAILED" in out and result(out).startswith("result=deployed ")
 
     code, out, state, _ = results["update-ok"]
     checks["update succeeds and records the previous digest"] = code == 0 and digest(state) == [DIGEST[NEXT]] \
@@ -420,8 +592,10 @@ try:
         and result(out).startswith("result=deployed") and image(state) == NEXT
 
     code, out, state, seconds = results["same-digest"]
-    checks["redeploying the running digest is a no-op patch that verifies"] = code == 0 and digest(state) == [DIGEST[GOOD]] \
-        and result(out).endswith(f"previous_digest={DIGEST[GOOD]}") and state["deployment"]["revision"] == 1 and seconds <= 10
+    load = (state.get("job") or {}).get("created", START + seconds) - START
+    checks["redeploying the running digest is a no-op patch that verifies (then load-tests)"] = code == 0 \
+        and digest(state) == [DIGEST[GOOD]] and result(out).endswith(f"previous_digest={DIGEST[GOOD]}") \
+        and state["deployment"]["revision"] == 1 and load <= 10
 
     code, out, state, seconds = results["stale-then-refresh"]
     checks["the previous digest's Synced and Healthy status is not taken for the new one"] = code == 0 \
@@ -464,11 +638,13 @@ try:
         and argocd_line(out).startswith(f"argocd digest={DIGEST[GOOD]} sync=OutOfSync out_of_sync={MONITOR_ID} ") \
         and argocd_line(out).endswith(" pending=none") and re.search(SMOKE, out, re.M) is not None
     code, out, state, _ = results["oos-update"]
-    checks["update: OutOfSync on the HPA and ServiceMonitor deploys after self-heal re-syncs, with both recorded"] = code == 0 \
+    checks["update: OutOfSync on the HPA and ServiceMonitor deploys after self-heal re-syncs, with both recorded, then "
+           "load-tests"] = code == 0 \
         and result(out).startswith(f"result=deployed image_uri={NEXT} revision=2 ") and image(state) == NEXT \
         and f" out_of_sync={HPA_ID},{MONITOR_ID} " in argocd_line(out) \
         and f" image={NEXT} ready=1 replicas=1/1/1 " in argocd_line(out) and only_digest_patches(state, DIGEST[NEXT]) \
-        and state["polls"] - state["synced_at"][DIGEST[NEXT]] > 2
+        and state["polls"] - state["synced_at"][DIGEST[NEXT]] > 2 \
+        and "load job=finrisk-load hpa_scaled=yes max_replicas=3 job_deleted=yes" in out
     checks["OutOfSync on the Deployment is never tolerated (drift other than its image would pass)"] = stopped("oos-deployment", "sync")
     checks["OutOfSync on the Service is never tolerated (the smoke test goes through it)"] = stopped("oos-service", "sync")
     checks["an object outside the chart out of sync is never tolerated"] = stopped("oos-extra-object", "sync")
@@ -497,10 +673,15 @@ try:
                        "no-namespace": "keyed without the namespace, the HPA's name in another namespace",
                        "no-group": "keyed without the group, a ServiceMonitor kind of another group",
                        "inference-container-only": "checking the inference container's image alone, a sidecar",
-                       "missing-hpa-without-hpa": "without the hpa check, a missing HPA under OutOfSync",
                        "drift-without-image": "without the image check, the previous image under OutOfSync"}.items():
         code, out, state, _ = results["control " + name]
         checks[f"negative control: {what} deploys"] = code == 0 and result(out).startswith(f"result=deployed image_uri={NEXT} ")
+    # The load test reads the HPA too, but only after the release serves: no re-patch, never a rollback.
+    code, out, state, _ = results["control missing-hpa-without-hpa"]
+    checks["negative control: without the hpa check, a missing HPA under OutOfSync is served, and only the load test fails"] = \
+        code == 1 and argocd_line(out).endswith(" pending=none") and re.search(SMOKE, out, re.M) is not None \
+        and result(out).startswith(f"result=load_not_started image_uri={NEXT} ") and "hpa phase=before current=none " in out \
+        and only_digest_patches(state, DIGEST[NEXT]) and not ROLLBACK_WORDS.search(out)
     code, out, state, _ = results["control no-hpa-preflight"]
     checks["negative control: without the HPA preflight, a runner that cannot read the HPA patches, then cannot re-patch"] = \
         code == 1 and only_digest_patches(state, DIGEST[NEXT], DIGEST[GOOD]) \
@@ -509,6 +690,15 @@ try:
     checks["a re-patch that Argo CD reports OutOfSync on a chart object still completes the rollback"] = code == 1 \
         and f"failure=progress_deadline digest={DIGEST[BAD]}" in out and image(state) == GOOD \
         and result(out) == f"result=rolled_back digest={DIGEST[BAD]} previous_digest={DIGEST[GOOD]}"
+    code, out, state, _ = results["oos-rollback-stale-deadline"]
+    checks["a re-patch that shows the old deadline on its first poll, then OutOfSync on the ServiceMonitor, still rolls back"] = \
+        code == 1 and f"failure=progress_deadline digest={DIGEST[BAD]}" in out and image(state) == GOOD \
+        and result(out) == f"result=rolled_back digest={DIGEST[BAD]} previous_digest={DIGEST[GOOD]}" \
+        and only_digest_patches(state, DIGEST[BAD], DIGEST[GOOD])
+    code, out, state, _ = results["oos-deadline-first-sighting"]
+    checks["negative control: there, a deadline counted on its first poll reports rollback_failed"] = code == 1 \
+        and image(state) == GOOD \
+        and result(out) == f"result=rollback_failed digest={DIGEST[BAD]} previous_digest={DIGEST[GOOD]} failure=progress_deadline"
 
     code, out, state, _ = results["rollback-observe-lag"]
     checks["a re-patch is not failed on the previous image's progress deadline before the Deployment observes it"] = \
@@ -516,6 +706,104 @@ try:
     code, out, state, _ = results["deadline-ignores-generation"]
     checks["negative control: a deadline verdict without observedGeneration fails that rollback"] = code == 1 \
         and result(out) == f"result=rollback_failed digest={DIGEST[BAD]} previous_digest={DIGEST[GOOD]} failure=progress_deadline"
+    # The Deployment observed the re-patched template, but its Progressing condition still shows the failed
+    # rollout's deadline for one read: the re-patch completed, so it is not a failed rollback.
+    code, out, state, _ = results["rollback-stale-deadline"]
+    checks["a progress deadline seen on one poll only (just after the re-patch) does not fail the rollback"] = code == 1 \
+        and f"failure=progress_deadline digest={DIGEST[BAD]}" in out and image(state) == GOOD \
+        and result(out) == f"result=rolled_back digest={DIGEST[BAD]} previous_digest={DIGEST[GOOD]}"
+    code, out, state, _ = results["deadline-first-sighting"]
+    checks["negative control: a deadline counted on its first poll reports rollback_failed for that completed re-patch"] = \
+        code == 1 and image(state) == GOOD \
+        and result(out) == f"result=rollback_failed digest={DIGEST[BAD]} previous_digest={DIGEST[GOOD]} failure=progress_deadline"
+    rolled_back = f"result=rolled_back digest={DIGEST[BAD]} previous_digest={DIGEST[GOOD]}"
+    rollback_failed = f"result=rollback_failed digest={DIGEST[BAD]} previous_digest={DIGEST[GOOD]} failure=progress_deadline"
+    # The failed update ended on two deadline polls in a row, so late was set when the re-patch began.
+    code, out, state, _ = results["rollback-synced-at-once"]
+    checks["a re-patch synced before its first poll, which shows the stale deadline, still rolls back (late reset first)"] = \
+        code == 1 and f"failure=progress_deadline digest={DIGEST[BAD]}" in out and image(state) == GOOD and result(out) == rolled_back
+    code, out, state, _ = results["late-carried-into-repatch"]
+    checks["negative control: late carried over from the failed update reports rollback_failed for that re-patch"] = \
+        code == 1 and image(state) == GOOD and result(out) == rollback_failed
+    code, out, state, _ = results["rollback-deadline-apart"]
+    checks["a stale deadline on two polls that are not in a row (deadline, waiting, deadline) does not fail the rollback"] = \
+        code == 1 and image(state) == GOOD and result(out) == rolled_back
+    code, out, state, _ = results["late-kept-between-polls"]
+    checks["negative control: late not reset by the poll in between reports rollback_failed there"] = \
+        code == 1 and image(state) == GOOD and result(out) == rollback_failed
+
+    # Load-test failures: the release passed its smoke test and stays (one digest patch, no re-patch, never
+    # called a rollback); the Job is deleted on every outcome; the build fails.
+    def healthy_after_load(state, out):
+        return only_digest_patches(state, DIGEST[NEXT]) and image(state) == NEXT and "smoke=passed" in out \
+            and len(re.findall(r"^FINRISK_EVIDENCE promql ", out, re.M)) >= 8 and not ROLLBACK_WORDS.search(out)
+
+    def cleaned(state, out):
+        job = state.get("job")
+        return (job is None or job.get("gone") is True) and "job_deleted=yes" in out \
+            and any(c.endswith("delete job finrisk-load --ignore-not-found --wait=false") for c in state["calls"])
+
+    code, out, state, seconds = results["load-never"]
+    checks["an HPA that never scales: result=hpa_not_scaled after the 300 s bound, release left serving, Job deleted"] = \
+        code == 1 and result(out) == f"result=hpa_not_scaled image_uri={NEXT} revision=2 argocd_revision={REVISION} " \
+        f"previous_digest={DIGEST[GOOD]}" and "hpa phase=during current=1 desired=1 cpu_utilization=45" in out \
+        and "load job=finrisk-load hpa_scaled=no max_replicas=1 job_deleted=yes" in out and seconds >= 300 \
+        and healthy_after_load(state, out) and cleaned(state, out) and (state["job"] or {}).get("image") == NEXT
+    code, out, state, _ = results["cleanup-on-success-only"]
+    checks["negative control: a Job deleted only after a passing load test is left behind when the HPA never scales"] = \
+        code == 1 and result(out).startswith("result=hpa_not_scaled ") and not (state["job"] or {}).get("deleted") \
+        and "job_deleted=no" in out
+    code, out, state, _ = results["load-at-two"]
+    checks["an HPA already above 1 replica: result=load_not_started, no Job created, nothing claimed scaled"] = code == 1 \
+        and result(out).startswith("result=load_not_started ") and "hpa phase=before current=2 " in out \
+        and state.get("job") is None and not any(c.endswith(" create -f -") for c in state["calls"]) and healthy_after_load(state, out) \
+        and "load job=finrisk-load hpa_scaled=no max_replicas=0 job_deleted=yes" in out
+    code, out, state, _ = results["scaled-from-any-reading"]
+    checks["negative control: hpa_scaled from every HPA reading claims a scale-out for a load test that never ran"] = code == 1 \
+        and result(out).startswith("result=load_not_started ") and "hpa_scaled=yes max_replicas=2 " in out
+    code, out, state, _ = results["fixed-window"]
+    load_args = state.get("load_args") or []
+    checks["negative control: a fixed PromQL window (not the seconds since the Job was created) is caught"] = \
+        len(load_args) == 1 and load_args[0][0] == ["900"] and load_args[0][1] != 900
+    code, out, state, _ = results["any-start"]
+    checks["negative control: without the 1-replica start check, an HPA already at 2 passes the load test"] = code == 0 \
+        and result(out).startswith("result=deployed ") and "hpa phase=before current=2 " in out
+    code, out, state, _ = results["job-create-fails"]
+    checks["a refused Job create: result=load_not_started, cleanup still runs, nothing claimed scaled"] = code == 1 \
+        and result(out).startswith("result=load_not_started ") and healthy_after_load(state, out) and cleaned(state, out) \
+        and "hpa_scaled=no max_replicas=0 " in out
+    code, out, state, _ = results["job-exists"]
+    checks["a Job left over by an earlier build: result=load_not_started, and the leftover is deleted"] = code == 1 \
+        and result(out).startswith("result=load_not_started ") and healthy_after_load(state, out) and cleaned(state, out) \
+        and state["job"]["image"] == "left over by an earlier build" and "hpa_scaled=no max_replicas=0 " in out
+    for name, expected in {"job-delete-fails": "job_deleted=no", "job-stuck": "job_deleted=no"}.items():
+        code, out, state, _ = results[name]
+        checks[f"a Job that is not gone ({name}) fails the build: result=load_cleanup_failed"] = code == 1 \
+            and result(out).startswith("result=load_cleanup_failed ") and "hpa_scaled=yes max_replicas=3 " + expected in out \
+            and only_digest_patches(state, DIGEST[NEXT]) and not ROLLBACK_WORDS.search(out)
+    code, out, state, _ = results["job-list-fails"]
+    checks["a failed list of the Job and its Pod is not taken for gone: result=load_cleanup_failed, job_deleted=no"] = code == 1 \
+        and result(out).startswith("result=load_cleanup_failed ") and "hpa_scaled=yes max_replicas=3 job_deleted=no" in out \
+        and only_digest_patches(state, DIGEST[NEXT]) and not ROLLBACK_WORDS.search(out)
+    code, out, state, _ = results["gone-fails-open"]
+    checks["negative control: a cleanup check that ignores the list's failure records job_deleted=yes unchecked"] = code == 0 \
+        and result(out).startswith("result=deployed ") and "job_deleted=yes" in out
+    code, out, state, _ = results["unlabelled-pod"]
+    checks["negative control: a Pod without the label the cleanup lists by is reported deleted while it still runs"] = code == 0 \
+        and result(out).startswith("result=deployed ") and "job_deleted=yes" in out and (state["job"] or {}).get("gone") is not True
+    code, out, state, _ = results["wide-window"]
+    checks["negative control: a window wider than the load interval passes on earlier history (ksm-unscaled deploys)"] = \
+        code == 0 and result(out).startswith("result=deployed ") and not exact_windows(state)
+    for mode, missing in {"ksm-unscaled": "hpa_max_current_replicas", "outage": "available_min", "no-requests": "request_rate"}.items():
+        code, out, state, _ = results["prom-load-" + mode]
+        checks[f"load evidence missing ({mode}): result=hpa_evidence_failed, release left serving, Job deleted"] = code == 1 \
+            and result(out).startswith(f"result=hpa_evidence_failed image_uri={NEXT} ") and f"promql failed: {missing}\n" in out \
+            and healthy_after_load(state, out) and cleaned(state, out)
+    code, out, state, _ = results["job-psa-rejected"]
+    checks["a load Job Pod Security rejects runs no Pod: hpa_not_scaled, the events say why, the Job is deleted"] = \
+        code == 1 and result(out).startswith("result=hpa_not_scaled ") and (state["job"] or {}).get("pods") == 0 \
+        and 'violates PodSecurity "restricted:latest"' in out and healthy_after_load(state, out) and cleaned(state, out) \
+        and "hpa_scaled=no max_replicas=1 " in out
 
     code, out, state, _ = results["app-read-fails"]
     checks["an Application read error stops before any change"] = code == 1 and unchanged(state) \

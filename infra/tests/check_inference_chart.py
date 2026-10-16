@@ -2,12 +2,12 @@
 # Renders charts/finrisk-inference with the pinned helm and checks the output: helm lint --strict,
 # kubeconform -strict against the cluster's Kubernetes schemas and the pinned ServiceMonitor CRD, Pod
 # Security restricted (pod_security.py), the finrisk AppProject's limits (Argo CD syncs it with the
-# ServiceMonitor on), and the wiring the deploy build relies on (the smoke test's Service address, the
-# port the image listens on, the container it execs into, the images it requires, the objects whose
-# OutOfSync it tolerates). The chart is the only deploy artifact. It needs the tools
-# .github/scripts/install-k8s-tools.sh installs into $K8S_TOOLS, so it is not named test_*.py (pytest would
-# collect it, and ci.yml installs no helm); terraform-validate.yml runs it after the install. A missing or
-# different tool fails: nothing skips.
+# ServiceMonitor on), the wiring the deploy build relies on (the smoke test's Service address, the port the
+# image listens on, the container it execs into, the images it requires, the objects whose OutOfSync it
+# tolerates), and that the load test's Pod is none of the release's Pods (no Service endpoint, not counted
+# by the HPA). The chart is the only deploy artifact. It needs the tools .github/scripts/install-k8s-tools.sh
+# installs into $K8S_TOOLS, so it is not named test_*.py (pytest would collect it, and ci.yml installs no
+# helm); terraform-validate.yml runs it after the install. A missing or different tool fails: nothing skips.
 import copy
 import json
 import os
@@ -27,6 +27,10 @@ APPLICATION = next(d for d in yaml.safe_load_all((ROOT / "infra/k8s/inference-ap
 PROJECT = next(d for d in yaml.safe_load_all((ROOT / "infra/k8s/argocd-projects.yaml").read_text())
                if d and d["metadata"]["name"] == APPLICATION["spec"]["project"])
 DEPLOY = (ROOT / "infra/terraform/deploy/deploy-buildspec.yml.tftpl").read_text()
+# The in-pod smoke test the deploy embeds, and the load test's Job: both reach the release's Service.
+SMOKE = (ROOT / "infra/k8s/smoke.py").read_text()
+LOAD_JOB = (ROOT / "infra/k8s/load-job.yaml").read_text()
+LOAD_POD_LABELS = yaml.safe_load(LOAD_JOB)["spec"]["template"]["metadata"].get("labels") or {}
 PATH_TF = (ROOT / "infra/terraform/deploy_path.tf").read_text()
 LISTEN_PORT = int(re.search(r'"--port", "(\d+)"', (ROOT / "Dockerfile").read_text())[1])
 CLUSTER = re.search(r'variable "eks_cluster_version" \{[^}]*default\s*=\s*"([0-9.]+)"',
@@ -117,15 +121,18 @@ def fits_project(docs):
 
 
 def wired(docs):
-    """The smoke test reaches the image through Service <app> port 80, which targets the port the image
-    listens on, and the deploy execs into container "inference"; the HPA alone sets the replica count."""
+    """The smoke test and the load Job reach the image through Service <app> port 80 (in the app
+    namespace), which targets the port the image listens on, and the deploy execs into container
+    "inference"; the HPA alone sets the replica count."""
     by = by_name(docs)
     deployment, service = by.get(("Deployment", APP)), by.get(("Service", APP))
     if not deployment or not service:
         return False
     template, selector = deployment["spec"]["template"], service["spec"].get("selector") or {}
     containers = template["spec"]["containers"]
-    return 'BASE = "http://${app}.${namespace}.svc.cluster.local"' in DEPLOY and "-c inference -- python -" in DEPLOY \
+    service_url = f"{service['metadata']['name']}.{service['metadata']['namespace']}.svc.cluster.local"
+    return f'BASE = "http://{service_url}"\n' in SMOKE and f'socket.gethostbyname("{service_url}")' in LOAD_JOB \
+        and service["metadata"]["name"] == APP and "-c inference -- python -" in DEPLOY \
         and [c["name"] for c in containers] == ["inference"] \
         and [p["containerPort"] for c in containers for p in c.get("ports", [])] == [LISTEN_PORT] \
         and [(p["port"], p.get("targetPort")) for p in service["spec"]["ports"]] == [(80, LISTEN_PORT)] \
@@ -154,6 +161,22 @@ def tolerated(docs, deploy=DEPLOY):
              for n in re.findall(r'"([^"]+)"', match[1])} if match else set()
     return bool(named) and named <= {identity(d) for d in docs} and not any(
         n.split("/")[1] in ("Deployment", "Service") for n in named)
+
+
+def pod_selectors(docs):
+    """The release's Pod selectors: the Service's (its endpoints, which the ServiceMonitor scrapes) and that
+    of the HPA's scale target, whose selector the HPA counts Pods by, whoever owns them. matchLabels only."""
+    by = by_name(docs)
+    target = ((by.get(("HorizontalPodAutoscaler", APP)) or {}).get("spec") or {}).get("scaleTargetRef") or {}
+    selector = ((by.get((target.get("kind"), target.get("name"))) or {}).get("spec") or {}).get("selector") or {}
+    service = (by.get(("Service", APP)) or {}).get("spec") or {}
+    return [service.get("selector") or {}, (selector.get("matchLabels") or {}) if set(selector) == {"matchLabels"} else {}]
+
+
+def apart(docs, labels):
+    """Each selector is set, and none selects a Pod with `labels`."""
+    selectors = pod_selectors(docs)
+    return all(selectors) and not any(s.items() <= labels.items() for s in selectors)
 
 
 def changed(docs, change):
@@ -257,6 +280,11 @@ checks = {
         "a fixed replica count": lambda b: b[("Deployment", APP)]["spec"].update(replicas=2),
         "a selector that misses the Pods": lambda b: b[("Service", APP)]["spec"].update(selector={"app": "other"}),
     }.items()},
+    f"the load test's Pod ({LOAD_POD_LABELS}) is selected by neither the Service nor the HPA's target":
+        apart(monitored, LOAD_POD_LABELS),
+    "negative control: the load Pod with the release's selector label is caught": not apart(monitored, {**LOAD_POD_LABELS, "app": APP}),
+    "negative control: a Deployment selector by expression (unread) is caught": not apart(changed(monitored, lambda b: b[
+        ("Deployment", APP)]["spec"]["selector"].update(matchExpressions=[{"key": "app", "operator": "Exists"}])), LOAD_POD_LABELS),
 }
 
 failed = [k for k, v in checks.items() if not v]

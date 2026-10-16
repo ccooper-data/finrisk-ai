@@ -3,9 +3,10 @@
 # allocatable CPU and memory of each worker type infra/terraform/variables.tf allows, with pods to
 # spare. Counted from the rendered charts (Argo CD with its hook Job, the lean Prometheus stack with
 # the operator-generated Prometheus Pod, the inference chart at HPA max plus one surge Pod), kube-system
-# as EKS 1.35 runs it, and PR 3's load Job. A t3.small (V1's type) must not fit: the check is not
-# vacuous. It needs the tools .github/scripts/install-k8s-tools.sh installs into $K8S_TOOLS, so it is
-# not named test_*.py; terraform-validate.yml runs it after the install.
+# as EKS 1.35 runs it, and the load test's Job (infra/k8s/load-job.yaml, at its parallelism). A t3.small
+# (V1's type) must not fit: the check is not vacuous. It needs the tools
+# .github/scripts/install-k8s-tools.sh installs into $K8S_TOOLS, so it is not named test_*.py;
+# terraform-validate.yml runs it after the install.
 import copy
 import math
 import re
@@ -36,7 +37,6 @@ SMALL = {"cpu_m": 1930, "memory_mi": memory_mi(11, capacity_mi=1900), "pods": 11
 # kube-system on a one-node EKS 1.35 cluster: aws-node (VPC CNI and its network policy agent),
 # kube-proxy, two CoreDNS and two metrics-server replicas, at their EKS default requests.
 KUBE_SYSTEM = [("aws-node", 1, 50, 64), ("kube-proxy", 1, 100, 0), ("coredns", 2, 100, 70), ("metrics-server", 2, 100, 200)]
-LOAD_JOB = ("PR 3 load Job", 1, 100, 64)
 
 
 def cpu_m(q):
@@ -96,6 +96,11 @@ def inference(docs):
     return workloads(docs, lambda kind, name, replicas: hpa + surge)
 
 
+def load_job(job):
+    """The load test's Job: its parallelism times its Pod's requests."""
+    return ("load test Job " + job["metadata"]["name"], job["spec"].get("parallelism", 1), *(pod(job["spec"]["template"]) or (math.inf, math.inf)))
+
+
 def budget(rows, node):
     cpu = sum(n * c for _, n, c, _ in rows)
     memory = sum(n * m for _, n, _, m in rows)
@@ -109,7 +114,8 @@ _, argo = argocd(yaml.safe_load((K8S / "argocd-values.yaml").read_text()))
 _, stack = monitoring(manifest("monitoring-app.yaml")[0]["spec"]["source"]["helm"]["valuesObject"])
 _, app = template(ROOT / "charts/finrisk-inference", "finrisk-inference", "finrisk", {
     "image": {"repository": "780976819607.dkr.ecr.us-east-1.amazonaws.com/finrisk-ai-inference", "digest": "sha256:" + "a" * 64}})
-rows = [*KUBE_SYSTEM, *workloads(argo), *workloads(stack), prometheus_pod(stack), *inference(app), LOAD_JOB]
+LOAD = manifest("load-job.yaml")[0]
+rows = [*KUBE_SYSTEM, *workloads(argo), *workloads(stack), prometheus_pod(stack), *inference(app), load_job(LOAD)]
 for row in rows:
     print(f"  {row[0]}: {row[1]} x ({row[2]:.0f}m, {row[3]:.0f}Mi)")
 
@@ -124,6 +130,14 @@ for name, node in NODES.items():
     checks[f"fits one {name}: {detail}"] = fits
 fits, detail = budget(rows, SMALL)
 checks[f"negative control: does not fit a t3.small ({detail})"] = not fits
+crowd = copy.deepcopy(LOAD)
+crowd["spec"]["parallelism"] = 12
+for name, node in NODES.items():
+    fits, detail = budget([*rows[:-1], load_job(crowd)], node)
+    checks[f"negative control: a load Job of 12 parallel Pods does not fit one {name} ({detail})"] = not fits
+unrequested = copy.deepcopy(LOAD)
+unrequested["spec"]["template"]["spec"]["containers"][0]["resources"].pop("requests")
+checks["negative control: a load Job without requests is caught"] = not math.isfinite(load_job(unrequested)[2])
 missing = copy.deepcopy(argo)
 docs_by(missing)[("Deployment", "argocd-repo-server")]["spec"]["template"]["spec"]["containers"][0].pop("resources")
 checks["negative control: a container without requests is caught"] = not all(
