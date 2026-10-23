@@ -7,17 +7,26 @@ matrix = (ROOT / "docs" / "aws-platform-acceptance-matrix.md").read_text()
 demo = (ROOT / "docs" / "aws-platform-demo.md").read_text()
 runbook = (ROOT / "docs" / "deployment-recovery-runbook.md").read_text()
 closeout = (ROOT / "docs" / "AWS_VALIDATION_CLOSEOUT.md").read_text()
+v2_closeout = (ROOT / "docs" / "AWS_V2_VALIDATION_CLOSEOUT.md").read_text()
 presentation = (ROOT / "docs" / "PORTFOLIO_PRESENTATION.md").read_text()
 rows = {line.split("|")[1].strip(): line for line in matrix.splitlines() if line.startswith("| ")}
 PENDING, LIVE = "| IMPLEMENTED / LIVE VALIDATION PENDING |", "| LIVE VALIDATED |"
+V1_RECORD, V2_RECORD = "docs/AWS_VALIDATION_CLOSEOUT.md", "docs/AWS_V2_VALIDATION_CLOSEOUT.md"
+V2_LIVE_ROWS = (
+    "V2 cluster add-ons (Argo CD, lean Prometheus, exposure guard)",
+    "V2 GitOps digest-only deploy",
+    "V2 Prometheus evidence of the deployed model",
+    "V2 HPA scale-out under a bounded load",
+    "V2 gate window evidence chain",
+)
 
 
 def status(row, value):
     return rows.get(row, "").rstrip().endswith(value)
 
 
-def live_with_evidence(row):
-    return status(row, LIVE) and "docs/AWS_VALIDATION_CLOSEOUT.md" in rows[row]
+def live_with_evidence(row, record=V1_RECORD):
+    return status(row, LIVE) and record in rows[row]
 
 
 checks = {
@@ -27,7 +36,7 @@ checks = {
     "live private deployment validated with evidence": live_with_evidence("Live private deployment of the pinned model"),
     "closeout records the live chain": all(term in closeout for term in (
         "smoke=passed model_sha256=", "result=deployed", "Destroy complete! Resources: 60 destroyed.")),
-    "live HPA remains pending": status("Live HPA scale-out", PENDING),
+    "live HPA scale-out is validated with its V2 record": live_with_evidence("Live HPA scale-out", V2_RECORD),
     "live telemetry remains pending": status("Live CloudWatch telemetry", PENDING),
     "live rollback remains pending": rows.get("Live failed-deploy rollback", "").rstrip()
         .endswith("| IMPLEMENTED / LIVE VALIDATION PENDING |"),
@@ -35,10 +44,10 @@ checks = {
         in rows.get("Live failed-deploy rollback", ""),
     "live teardown validated with evidence": live_with_evidence("Live teardown/cost evidence"),
     # The cost figures are filled in from Cost Explorer before merge.
-    "closeout cost recorded": not re.search(r"COST_\w*PENDING", closeout + presentation),
+    "closeout cost recorded": not re.search(r"COST_\w*PENDING", closeout + v2_closeout + presentation),
     "production claim bounded": "must not be described as a fully production-validated AWS deployment" in matrix,
     "demo preserves evidence language": "implemented and CI-validated" in demo
-        and "Do not say those behaviors were live-tested in AWS" in demo,
+        and "Do not say rollback or telemetry was live-tested in AWS" in demo,
     "runbook requires teardown": "successful teardown is part of the portfolio evidence" in runbook,
     # Deploy runs as the release role. A non-first failure returns to the digest recorded before the
     # patch (never rollout undo, which Argo CD's self-heal reverts); a failed first deploy is retained for
@@ -52,10 +61,14 @@ checks = {
     "a failed first deploy is retained, not called a rollback or recovery": "result=first_deploy_retained" in runbook
         and "This is not a rollback; do not describe it as one or as a recovery." in runbook
         and "left in place for diagnosis" in demo and "delete a failed first deploy" not in demo,
-    # V2 (PRs 2a, 2b and 3) has not run in a window: every V2 row stays pending.
-    "V2 rows, the HPA load test and the gate window's chain included, remain pending": all(
-        status(row, PENDING) for row in rows if row.startswith("V2 ")) and {"V2 HPA scale-out under a bounded load",
-                                                                           "V2 gate window evidence chain"} <= set(rows),
+    # V2 ran in the 2026-10-16 window. Its rows are live with the V2 record, except failed-deploy
+    # handling, which no failure path exercised live.
+    "V2 rows are live with the V2 record; failed-deploy handling stays pending": all(
+        live_with_evidence(row, V2_RECORD) for row in V2_LIVE_ROWS) and status("V2 failed-deploy handling", PENDING)
+        and {*V2_LIVE_ROWS, "V2 failed-deploy handling"} <= set(rows),
+    "V2 record holds the gate window's evidence": all(term in v2_closeout for term in (
+        "result=deployed", "smoke=passed model_sha256=", "Destroy complete! Resources: 60 destroyed.",
+        "7d0f526fa13408f38c6e9cf93d3305478148ef55", "served traffic")),
     "a failed load test is documented as a failed gate, never a rollback or recovery": all(
         f"`result={r}`" in runbook for r in ("load_not_started", "hpa_not_scaled", "hpa_evidence_failed", "load_cleanup_failed"))
         and "none of these is a rollback or a recovery" in runbook,
