@@ -42,4 +42,4 @@ Explain the operating model:
 ## Evidence-language guardrail
 The 2026-10-03 window live-validated deployment and serving (see `docs/AWS_VALIDATION_CLOSEOUT.md`). You may say the inference service was deployed by digest to a private EKS cluster, became ready, served the pinned model with its SHA-256 verified in the pod, returned a live prediction, and was torn down with empty state verified.
 
-For autoscaling (HPA scale-out) and rollback, say **implemented and CI-validated**. For CloudWatch runtime telemetry, say the instrumentation and alarm definitions are CI-validated but nothing exports to CloudWatch yet. Do not say those behaviors were live-tested in AWS.
+For HPA scale-out, say it was **live-tested** in the bounded 2026-10-16 window: the HPA took the Deployment from 1 to 3 replicas under a synthetic load, with at least one replica available throughout. Do not say the added replicas served traffic. For rollback, say **implemented and CI-validated**. For CloudWatch runtime telemetry, say the instrumentation and alarm definitions are CI-validated but nothing exports to CloudWatch yet. Do not say rollback or telemetry was live-tested in AWS.

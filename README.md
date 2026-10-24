@@ -44,10 +44,11 @@ The portfolio cloud architecture has been exercised against a real AWS account, 
   - the pod became Ready and served the pinned model, with its SHA-256 verified in the pod;
   - a live prediction came back through the in-cluster Service;
   - all 60 resources were destroyed, and empty state was verified.
-- HPA scale-out and live failed-deploy rollback were not exercised in AWS; they remain implemented and CI-validated only.
+- A third bounded window (V2, 2026-10-16, commit `7d0f526fa13408f38c6e9cf93d3305478148ef55`) ran the GitOps path: Argo CD tracked the chart at the frozen commit, the deploy changed only the image digest and converged Synced and Healthy, in-cluster Prometheus recorded the deployed model's metrics, and a bounded load test took the HPA from 1 to 3 replicas. The added replicas were not confirmed Available, so the window does not show them serving traffic.
+- Live failed-deploy rollback was not exercised in AWS; it remains implemented and CI-validated only.
 - CloudWatch runtime telemetry was not exercised and is not implemented end to end. The OpenTelemetry instrumentation and the CloudWatch alarm definitions are CI-validated, but nothing exports to CloudWatch yet: there is no exporter and no log shipping (V1.1 backlog).
 
-See [AWS validation closeout](docs/AWS_VALIDATION_CLOSEOUT.md) and [bounded AWS validation contract](docs/bounded-aws-validation.md).
+See [AWS validation closeout](docs/AWS_VALIDATION_CLOSEOUT.md), [AWS V2 validation closeout](docs/AWS_V2_VALIDATION_CLOSEOUT.md) and [bounded AWS validation contract](docs/bounded-aws-validation.md).
 
 ## Leakage controls
 
